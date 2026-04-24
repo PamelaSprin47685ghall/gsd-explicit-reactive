@@ -1,33 +1,40 @@
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export default async function registerExtension(pi: ExtensionAPI) {
-  // 尝试多种可能的路径来定位 GSD 核心模块
-  const possiblePaths = [
-    "../gsd",                             // 同级目录 (gsd install 后的标准布局)
-    "../../extensions/gsd",                // 相对 git 缓存目录的布局
-    "/home/kunweiz/.gsd/agent/extensions/gsd" // 绝对路径兜底
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+
+  // 1. 探测 GSD 核心扩展的安装路径
+  const possibleCoreDirs = [
+    join(__dirname, "..", "gsd"),                              // 同级 (gsd install 布局)
+    join(__dirname, "..", "..", "extensions", "gsd"),          // 相对 git 缓存
+    join(__dirname, "..", "..", "..", "extensions", "gsd"),       // 深度 git 缓存
+    "/home/kunweiz/.gsd/agent/extensions/gsd"                 // 绝对路径
   ];
 
-  let corePath = "";
-  for (const p of possiblePaths) {
-    try {
-      const testPath = join(import.meta.url.replace("file://", ""), "..", p, "auto-dispatch.js");
-      corePath = p;
+  let coreDir = "";
+  for (const dir of possibleCoreDirs) {
+    if (existsSync(join(dir, "auto-dispatch.js"))) {
+      coreDir = dir;
       break;
-    } catch { continue; }
+    }
   }
 
-  // 默认回退到标准相对路径
-  const base = corePath || "../gsd";
+  if (!coreDir) {
+    process.stderr.write("[Explicit Reactive] ERROR: Could not find GSD core extension directory.\n");
+    return;
+  }
 
-  const autoDispatch = await import(`${base}/auto-dispatch.js`);
-  const filesModule = await import(`${base}/files.js`);
-  const dbModule = await import(`${base}/gsd-db.js`);
-  const promptsModule = await import(`${base}/auto-prompts.js`);
-  const reactiveGraph = await import(`${base}/reactive-graph.js`);
-  const prefsModels = await import(`${base}/preferences-models.js`);
+  // 2. 动态导入核心模块 (使用绝对路径导入绕过相对路径解析问题)
+  const autoDispatch = await import(join(coreDir, "auto-dispatch.js"));
+  const filesModule = await import(join(coreDir, "files.js"));
+  const dbModule = await import(join(coreDir, "gsd-db.js"));
+  const promptsModule = await import(join(coreDir, "auto-prompts.js"));
+  const reactiveGraph = await import(join(coreDir, "reactive-graph.js"));
+  const prefsModels = await import(join(coreDir, "preferences-models.js"));
 
   const DISPATCH_RULES = autoDispatch.DISPATCH_RULES;
 
