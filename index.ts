@@ -12,7 +12,7 @@ export default async function registerExtension(pi: ExtensionAPI) {
     join(__dirname, "..", "gsd"),                              // 同级 (gsd install 布局)
     join(__dirname, "..", "..", "extensions", "gsd"),          // 相对 git 缓存
     join(__dirname, "..", "..", "..", "extensions", "gsd"),       // 深度 git 缓存
-    "/home/kunweiz/.gsd/agent/extensions/gsd"                 // 绝对路径
+    join(process.env.HOME || "", ".gsd/agent/extensions/gsd")   // 绝对路径 (自动获取 HOME)
   ];
 
   let coreDir = "";
