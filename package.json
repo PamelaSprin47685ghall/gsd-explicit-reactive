@@ -12,6 +12,5 @@
     ]
   },
   "peerDependencies": {
-    "@gsd/pi-coding-agent": "*"
   }
 }
