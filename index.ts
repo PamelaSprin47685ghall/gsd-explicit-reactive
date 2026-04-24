@@ -3,14 +3,31 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 export default async function registerExtension(pi: ExtensionAPI) {
-  // 动态导入 GSD 原生核心模块
-  // 假设核心扩展在 ../gsd/ 目录下 (GSD v2 标准安装路径)
-  const autoDispatch = await import("../gsd/auto-dispatch.js");
-  const filesModule = await import("../gsd/files.js");
-  const dbModule = await import("../gsd/gsd-db.js");
-  const promptsModule = await import("../gsd/auto-prompts.js");
-  const reactiveGraph = await import("../gsd/reactive-graph.js");
-  const prefsModels = await import("../gsd/preferences-models.js");
+  // 尝试多种可能的路径来定位 GSD 核心模块
+  const possiblePaths = [
+    "../gsd",                             // 同级目录 (gsd install 后的标准布局)
+    "../../extensions/gsd",                // 相对 git 缓存目录的布局
+    "/home/kunweiz/.gsd/agent/extensions/gsd" // 绝对路径兜底
+  ];
+
+  let corePath = "";
+  for (const p of possiblePaths) {
+    try {
+      const testPath = join(import.meta.url.replace("file://", ""), "..", p, "auto-dispatch.js");
+      corePath = p;
+      break;
+    } catch { continue; }
+  }
+
+  // 默认回退到标准相对路径
+  const base = corePath || "../gsd";
+
+  const autoDispatch = await import(`${base}/auto-dispatch.js`);
+  const filesModule = await import(`${base}/files.js`);
+  const dbModule = await import(`${base}/gsd-db.js`);
+  const promptsModule = await import(`${base}/auto-prompts.js`);
+  const reactiveGraph = await import(`${base}/reactive-graph.js`);
+  const prefsModels = await import(`${base}/preferences-models.js`);
 
   const DISPATCH_RULES = autoDispatch.DISPATCH_RULES;
 
