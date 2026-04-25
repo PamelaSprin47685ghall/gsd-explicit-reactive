@@ -1,8 +1,8 @@
 {
-  "id": "explicit-reactive",
-  "name": "Explicit Reactive Engine",
-  "version": "1.0.1",
-  "description": "Intercepts execution to force fine-grained task breakdown and explicit DAG generation for robust parallel execution.",
+  "id": "wave-optimizer",
+  "name": "Wave-Based Concurrency Optimizer",
+  "version": "2.0.0",
+  "description": "Forces LLM to break down tasks into uniformly-sized waves for optimal Bulk Synchronous Parallel (BSP) execution.",
   "tier": "community",
   "requires": {
     "platform": "any"

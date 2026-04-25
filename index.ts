@@ -1,46 +1,25 @@
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import os from "node:os";
-
-async function resolveGsdModule(moduleName: string) {
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  
-  // 1. Try relative sibling (dev mode)
-  let gsdPath = join(__dirname, "..", "gsd");
-  if (existsSync(join(gsdPath, moduleName))) {
-    return import(pathToFileURL(join(gsdPath, moduleName)).href);
-  }
-
-  // 2. Try GSD install path
-  gsdPath = join(os.homedir(), ".gsd", "agent", "extensions", "gsd");
-  if (existsSync(join(gsdPath, moduleName))) {
-    return import(pathToFileURL(join(gsdPath, moduleName)).href);
-  }
-
-  // 3. Last resort fallback
-  throw new Error(`Cannot find GSD module: ${moduleName}`);
-}
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 export default async function registerExtension(pi: ExtensionAPI) {
   // 1. 动态加载 GSD 内部模块
-  const autoDispatch = await resolveGsdModule("auto-dispatch.js");
-  const filesModule = await resolveGsdModule("files.js");
-  const dbModule = await resolveGsdModule("gsd-db.js");
-  const promptsModule = await resolveGsdModule("auto-prompts.js");
-  const reactiveGraph = await resolveGsdModule("reactive-graph.js");
-  const prefsModels = await resolveGsdModule("preferences-models.js");
+  // 假设扩展部署在 GSD 扩展目录下，可以通过相对路径访问核心模块
+  const autoDispatch = await import("../gsd/auto-dispatch.js");
+  const filesModule = await import("../gsd/files.js");
+  const dbModule = await import("../gsd/gsd-db.js");
+  const promptsModule = await import("../gsd/auto-prompts.js");
+  const reactiveGraph = await import("../gsd/reactive-graph.js");
+  const prefsModels = await import("../gsd/preferences-models.js");
 
   const DISPATCH_RULES = autoDispatch.DISPATCH_RULES;
 
   // =====================================================================
-  // 规则 1：强制并发重构关卡 (Concurrency Breakdown Gate)
-  // 如果发现任何 Txx-PLAN.md 缺少 explicit `depends`，拒绝执行，
-  // 强制 LLM 重新思考并拆分成适合并行的细粒度任务。
+  // 规则 1：波次优化强制关卡 (Wave Optimization Gate)
+  // 如果发现 Txx-PLAN.md 缺少 explicit `wave` 字段，拦截并强制重构。
   // =====================================================================
-  const enforceBreakdownRule = {
-    name: "executing → enforce-explicit-dependencies",
+  const enforceWaveBreakdownRule = {
+    name: "executing → enforce-wave-breakdown",
     match: async ({ state, mid, basePath, prefs }: any) => {
       if (state.phase !== "executing" || !state.activeSlice) return null;
       
@@ -58,59 +37,60 @@ export default async function registerExtension(pi: ExtensionAPI) {
         return null; 
       }
 
-      // 检查是否所有任务都有 depends 字段
+      // 检查是否所有任务都分配了 wave
       let needsOptimization = false;
       for (const file of files) {
         const content = readFileSync(join(tasksDir, file), "utf-8");
         const [fm] = filesModule.splitFrontmatter(content);
         const meta = fm ? filesModule.parseFrontmatterMap(fm) : {};
         
-        if (meta.depends === undefined) {
+        // 核心检查：必须存在 wave 字段
+        if (meta.wave === undefined || isNaN(Number(meta.wave))) {
           needsOptimization = true;
           break;
         }
       }
 
-      if (!needsOptimization) return null; // 已经优化过，放行给并发引擎
+      if (!needsOptimization) return null; // 已经优化过，放行
 
-      process.stderr.write(`\n[Explicit Reactive Plugin] Intercepted ${mid}/${sid}. Forcing fine-grained breakdown.\n`);
+      process.stderr.write(`\n[Wave Optimizer] Intercepted ${mid}/${sid}. Forcing uniform wave-based breakdown.\n`);
 
-      // 拦截并派发强制重构任务
       return {
         action: "dispatch",
         unitType: "custom-step",
-        unitId: `${mid}/${sid}/optimize-concurrency`,
-        prompt: `## Parallel Task Breakdown Required (CRITICAL)
+        unitId: `${mid}/${sid}/optimize-waves`,
+        prompt: `## Wave-Based Execution Optimization (CRITICAL)
 
-You are about to execute slice \`${sid}: ${sTitle}\`. However, the current task plan was likely generated sequentially and is too coarse-grained for efficient parallel execution.
+You are about to execute slice \`${sid}: ${sTitle}\`. However, the current task plan is not optimized for our execution engine.
 
-To leverage the system's parallel reactive engine, you MUST completely refactor the task plan for this slice.
+**ENGINE CONSTRAINTS (Bulk Synchronous Parallel):**
+Our engine executes tasks in synchronous "waves". It dispatches a batch of tasks simultaneously and **waits for ALL of them to finish** before moving to the next wave.
+If you put one massive task and two tiny tasks in the same wave, the tiny tasks will finish in seconds, and the engine will sit completely idle waiting for the massive task to finish.
 
 **Your Mission:**
-1. **Deconstruct:** Break down the current coarse tasks in \`${sid}-PLAN.md\` into much smaller, highly cohesive, and decoupled sub-tasks.
-2. **Maximize Concurrency:** Design the new tasks so that as many as possible can run simultaneously without file conflicts.
-3. **Rewrite Files:** Use the \`write\` or \`edit\` tools to thoroughly update \`${sid}-PLAN.md\` and recreate the \`tasks/Txx-PLAN.md\` files to reflect your new fine-grained architecture.
-4. **Explicit Dependencies:** Determine the strict execution order (e.g., T02 must wait for T01).
-5. **The Proof Marker:** For EVERY \`Txx-PLAN.md\` file, you MUST inject a \`depends\` array into its YAML frontmatter. This is the system's proof that the task has been optimized.
-   - Example format:
+1. **Uniform Task Sizing:** You MUST break down the current coarse tasks in \`${sid}-PLAN.md\` into smaller sub-tasks that are **roughly EQUAL in estimated execution time and complexity**.
+2. **Wave Assignment:** Group independent tasks that can be safely executed in parallel into the same wave. 
+3. **Rewrite Files:** Use the \`write\` or \`edit\` tools to rewrite \`${sid}-PLAN.md\` and the \`tasks/Txx-PLAN.md\` files to reflect this new uniform architecture.
+4. **The Proof Marker:** For EVERY \`Txx-PLAN.md\` file, you MUST inject a \`wave: <number>\` field into its YAML frontmatter.
+   - Example format for a task in the first batch:
      \`\`\`yaml
      ---
-     depends: [T01, T02]
+     wave: 1
      ---
      \`\`\`
-   - If a task has no prerequisites and can run immediately, you MUST write \`depends: []\`.
+   - Tasks in \`wave: 2\` will only start after ALL tasks in \`wave: 1\` are completely finished.
 
-Do NOT start executing the actual code/tasks yet. Only redesign the plan, rewrite the markdown files, and complete your turn.`,
+Do NOT start executing the actual code/tasks yet. Only redesign the plan into uniform waves, rewrite the markdown files, and complete your turn.`,
       };
     }
   };
 
   // =====================================================================
-  // 规则 2：显式并发调度引擎 (Robust Explicit DAG Engine)
-  // 只认 YAML 里的 depends 构建执行图
+  // 规则 2：纯波次执行引擎 (Pure Wave-Based Engine)
+  // 只读取未完成任务中 wave 最小的一批，作为当前波次派发
   // =====================================================================
-  const robustReactiveRule = {
-    name: "executing → explicit-reactive-execute",
+  const waveReactiveRule = {
+    name: "executing → reactive-execute (parallel dispatch)", // 保持名字一样以便替换
     match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry }: any) => {
       if (state.phase !== "executing" || !state.activeTask || !state.activeSlice) return null;
 
@@ -133,7 +113,7 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan, rewrit
       }
 
       const completed = new Set<string>();
-      const allTasks: Array<{ id: string, depends: string[], done: boolean }> = [];
+      const pendingTasks: Array<{ id: string, wave: number }> = [];
 
       for (const file of files) {
         const tid = file.replace("-PLAN.md", "");
@@ -141,12 +121,8 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan, rewrit
         const [fm] = filesModule.splitFrontmatter(content);
         const meta = fm ? filesModule.parseFrontmatterMap(fm) : {};
 
-        let depends: string[] = [];
-        if (Array.isArray(meta.depends)) {
-          depends = meta.depends.map(String).map(s => s.trim().toUpperCase());
-        } else if (typeof meta.depends === "string") {
-          depends = meta.depends.split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
-        }
+        let wave = Number(meta.wave);
+        if (isNaN(wave)) wave = 999; // 兜底容错
 
         let done = false;
         if (dbModule.isDbAvailable()) {
@@ -156,26 +132,44 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan, rewrit
           }
         }
 
-        if (done) completed.add(tid);
-        allTasks.push({ id: tid, depends, done });
+        if (done) {
+          completed.add(tid);
+        } else {
+          pendingTasks.push({ id: tid, wave });
+        }
       }
 
-      // 根据显式的 depends 计算可以立即并发执行的任务
-      const readyIds = allTasks
-        .filter(t => !t.done && t.depends.every(d => completed.has(d)))
+      if (pendingTasks.length === 0) return null;
+
+      // 找到当前未完成任务中，wave 最小的波次
+      const minWave = Math.min(...pendingTasks.map(t => t.wave));
+
+      // 筛选出属于当前波次的所有任务
+      const currentWaveIds = pendingTasks
+        .filter(t => t.wave === minWave)
         .map(t => t.id)
         .sort();
 
-      if (readyIds.length <= 1) return null; 
+      // 如果当前波次只有 1 个任务，回退为原生单线执行（节省资源）
+      if (currentWaveIds.length <= 1) return null; 
 
-      const selected = readyIds.slice(0, maxParallel);
-      process.stderr.write(`\n[Explicit Reactive Plugin] ${mid}/${sid} DAG Ready: ${readyIds.length} | Dispatching: ${selected.join(",")}\n`);
+      // 受 max_parallel 限制，截取当前波次要派发的任务
+      // (没选中的任务依然在这个 wave 里，等这批跑完下一回合继续取这批)
+      const selected = currentWaveIds.slice(0, maxParallel);
 
+      process.stderr.write(`\n[Wave Optimizer] ${mid}/${sid} Wave ${minWave} Ready: ${currentWaveIds.length} | Dispatching: ${selected.join(",")}\n`);
+
+      // 写入状态，伪造一个 graphSnapshot 喂给原生健康检查
       reactiveGraph.saveReactiveState(basePath, mid, sid, {
         sliceId: sid,
         completed: [...completed],
         dispatched: selected,
-        graphSnapshot: { taskCount: allTasks.length, edgeCount: 0, readySetSize: readyIds.length, ambiguous: false },
+        graphSnapshot: { 
+          taskCount: pendingTasks.length + completed.size, 
+          edgeCount: 0, 
+          readySetSize: currentWaveIds.length, 
+          ambiguous: false 
+        },
         updatedAt: new Date().toISOString(),
       });
 
@@ -198,10 +192,13 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan, rewrit
   const oldRuleIndex = DISPATCH_RULES.findIndex((r: any) => r.name === "executing → reactive-execute (parallel dispatch)");
   
   if (oldRuleIndex !== -1) {
-    DISPATCH_RULES[oldRuleIndex] = robustReactiveRule;
-    DISPATCH_RULES.splice(oldRuleIndex, 0, enforceBreakdownRule);
-    process.stderr.write("[Explicit Reactive Plugin] Loaded. Native reactive engine hijacked and breakdown gate added.\n");
+    // 替换原生的图计算派发器为纯波次派发器
+    DISPATCH_RULES[oldRuleIndex] = waveReactiveRule;
+    // 在派发前插入拦截器，强迫 LLM 切分波次和均匀化任务
+    DISPATCH_RULES.splice(oldRuleIndex, 0, enforceWaveBreakdownRule);
+    
+    process.stderr.write("[Wave Optimizer] Loaded. Reactive engine replaced with uniform wave execution.\n");
   } else {
-    process.stderr.write("[Explicit Reactive Plugin] Failed to find target rule. GSD version mismatch?\n");
+    process.stderr.write("[Wave Optimizer] Failed to find target rule. GSD version mismatch?\n");
   }
 }
