@@ -4,13 +4,16 @@ import { join } from "node:path";
 
 export default async function registerExtension(pi: ExtensionAPI) {
   // 1. 动态加载 GSD 内部模块
-  // 假设扩展部署在 GSD 扩展目录下，可以通过相对路径访问核心模块
-  const autoDispatch = await import("../gsd/auto-dispatch.js");
-  const filesModule = await import("../gsd/files.js");
-  const dbModule = await import("../gsd/gsd-db.js");
-  const promptsModule = await import("../gsd/auto-prompts.js");
-  const reactiveGraph = await import("../gsd/reactive-graph.js");
-  const prefsModels = await import("../gsd/preferences-models.js");
+  // 适配不同的部署环境，优先从环境变量获取 GSD 核心路径
+  const gsdCorePath = (process.env.GSD_CODING_AGENT_DIR ? join(process.env.GSD_CODING_AGENT_DIR, 'extensions', 'gsd') : null) ||
+                     (process.env.GSD_PKG_ROOT ? join(process.env.GSD_PKG_ROOT, 'dist/resources/extensions/gsd') : '../gsd');
+
+  const autoDispatch = await import(join(gsdCorePath, "auto-dispatch.js"));
+  const filesModule = await import(join(gsdCorePath, "files.js"));
+  const dbModule = await import(join(gsdCorePath, "gsd-db.js"));
+  const promptsModule = await import(join(gsdCorePath, "auto-prompts.js"));
+  const reactiveGraph = await import(join(gsdCorePath, "reactive-graph.js"));
+  const prefsModels = await import(join(gsdCorePath, "preferences-models.js"));
 
   const DISPATCH_RULES = autoDispatch.DISPATCH_RULES;
 
