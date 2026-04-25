@@ -86,6 +86,10 @@ export function getTask(mid, sid, tid) {
     `export async function buildReactiveExecutePrompt(mid, midTitle, sid, sTitle, selected) {
   return "prompt:" + mid + "/" + sid + ":" + selected.join(",");
 }
+
+export async function buildPlanSlicePrompt(mid, midTitle, sid) {
+  return "BASE_PLAN_PROMPT:" + mid + "/" + sid;
+}
 `,
     "utf-8",
   );
@@ -173,7 +177,10 @@ async function prepareRule() {
   const rule = autoDispatch.DISPATCH_RULES.find((entry) => entry?.name === "executing → reactive-execute (parallel dispatch)");
   assert.ok(rule, "patched reactive-execute rule should exist");
 
-  return { rule, reactiveGraph, db };
+  const enforceRule = autoDispatch.DISPATCH_RULES.find((entry) => entry?.name === "executing → enforce-wave-breakdown");
+  assert.ok(enforceRule, "wave rewrite enforcement rule should exist");
+
+  return { rule, enforceRule, reactiveGraph, db };
 }
 
 async function runRule(rule, basePath, prefs = {}) {
@@ -191,6 +198,46 @@ async function runRule(rule, basePath, prefs = {}) {
     modelRegistry: {},
   });
 }
+
+test("wave rewrite dispatch reuses standard plan-slice unit with wave overlay constraints", async () => {
+  const { enforceRule } = await prepareRule();
+
+  const basePath = mkdtempSync(join(tmpdir(), "explicit-reactive-rewrite-"));
+  const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
+  const tasksDir = join(sliceDir, "tasks");
+  mkdirSync(tasksDir, { recursive: true });
+
+  writeFileSync(
+    join(sliceDir, "S01-PLAN.md"),
+    `# S01\n\n## Goal\nHarden object-pool safety and deterministic optimization outputs.\n\n## Tasks\n- placeholder\n`,
+    "utf-8",
+  );
+  writeTaskPlan(tasksDir, "T01", ["owner: planner"]); // wave missing => force rewrite dispatch
+
+  const dispatch = await enforceRule.match({
+    state: {
+      phase: "executing",
+      activeSlice: { id: "S01", title: "Slice 01" },
+    },
+    mid: "M001",
+    midTitle: "Milestone 001",
+    basePath,
+    sessionContextWindow: 64000,
+    modelRegistry: {},
+  });
+
+  assert.ok(dispatch, "enforce-wave-breakdown should dispatch when wave metadata is missing");
+  assert.equal(dispatch.unitType, "plan-slice", "rewrite should reuse standard plan-slice unit type");
+  assert.equal(dispatch.unitId, "M001/S01", "rewrite should reuse standard plan-slice unit id");
+  assert.match(dispatch.prompt, /Wave Execution Constraint/, "prompt should include wave overlay header");
+  assert.match(dispatch.prompt, /gsd_plan_slice/, "overlay should reinforce gsd_plan_slice persistence");
+  assert.match(dispatch.prompt, /BASE_PLAN_PROMPT:M001\/S01/, "prompt should include standard plan-slice prompt body");
+  assert.match(
+    dispatch.prompt,
+    /Harden object-pool safety and deterministic optimization outputs\./,
+    "overlay should carry parsed goal text from the existing slice plan",
+  );
+});
 
 test("reactive batch selection is deterministic, truncated at 8, and persisted with stable state semantics", async () => {
   const { rule, reactiveGraph, db } = await prepareRule();
@@ -327,6 +374,7 @@ export function parseFrontmatterMap() { return {}; }
   writeFileSync(
     join(coreDir, "auto-prompts.js"),
     `export async function buildReactiveExecutePrompt() { return "noop"; }
+export async function buildPlanSlicePrompt() { return "noop-plan"; }
 `,
     "utf-8",
   );

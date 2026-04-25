@@ -108,6 +108,51 @@ function parseWaveMeta(rawWave: unknown): { wave: number | null; reason: string 
   return { wave: numericWave, reason: null };
 }
 
+function extractGoalFromPlan(content: string): string | null {
+  const normalized = String(content || "");
+  const goalHeading = normalized.match(/^##\s+Goal\s*$/im);
+  if (!goalHeading || goalHeading.index === undefined) return null;
+
+  const afterHeading = normalized.slice(goalHeading.index + goalHeading[0].length);
+  const boundaryMatch = afterHeading.match(/\n##\s+/);
+  const goalBlock = (boundaryMatch ? afterHeading.slice(0, boundaryMatch.index) : afterHeading).trim();
+  if (!goalBlock) return null;
+
+  const firstNonEmpty = goalBlock
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+
+  if (!firstNonEmpty) return null;
+  return firstNonEmpty.replace(/^[-*]\s+/, "").trim() || null;
+}
+
+function readSliceGoalOrFallback(basePath: string, mid: string, sid: string, fallback: string): string {
+  const planPath = join(basePath, ".gsd", "milestones", mid, "slices", sid, `${sid}-PLAN.md`);
+  try {
+    const content = readFileSync(planPath, "utf-8");
+    const parsed = extractGoalFromPlan(content);
+    if (parsed) return parsed;
+
+    logDispatchDiagnostic("wave-rewrite", "goal-missing-in-plan", "Slice plan is missing a parseable Goal section; using fallback title", {
+      mid,
+      sid,
+      planPath,
+      fallback,
+    });
+    return fallback;
+  } catch (err) {
+    logDispatchDiagnostic("wave-rewrite", "goal-read-failed", "Failed to read slice plan while extracting goal; using fallback title", {
+      mid,
+      sid,
+      planPath,
+      fallback,
+      error: errMessage(err),
+    });
+    return fallback;
+  }
+}
+
 function clearReactiveStateSafely(
   reactiveGraph: any,
   basePath: string,
@@ -275,6 +320,13 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
     return;
   }
 
+  if (typeof promptsModule?.buildPlanSlicePrompt !== "function") {
+    logDispatchDiagnostic("module-load", "contract-mismatch", "auto-prompts missing buildPlanSlicePrompt", {
+      module: "auto-prompts",
+    });
+    return;
+  }
+
   if (typeof reactiveGraph?.saveReactiveState !== "function") {
     logDispatchDiagnostic("module-load", "contract-mismatch", "reactive-graph missing saveReactiveState", {
       module: "reactive-graph",
@@ -291,7 +343,7 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
 
   const enforceWaveBreakdownRule = {
     name: "executing → enforce-wave-breakdown",
-    match: async ({ state, mid, basePath }: any) => {
+    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry }: any) => {
       if (state.phase !== "executing" || !state.activeSlice) return null;
 
       const sid = state.activeSlice.id;
@@ -361,41 +413,44 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
 
       if (!needsOptimization) return null;
 
-      const unitId = `${mid}/${sid}/optimize-waves`;
-      logDispatchDiagnostic("wave-rewrite", "dispatch", "Dispatching forced wave rewrite step", {
+      const sliceGoal = readSliceGoalOrFallback(basePath, mid, sid, sTitle);
+      const unitId = `${mid}/${sid}`;
+      logDispatchDiagnostic("wave-rewrite", "dispatch", "Dispatching wave rewrite via standard plan-slice unit", {
         mid,
         sid,
         unitId,
         taskPlanCount: files.length,
       });
 
+      const standardPlanPrompt = await promptsModule.buildPlanSlicePrompt(
+        mid,
+        midTitle ?? mid,
+        sid,
+        sTitle,
+        basePath,
+        undefined,
+        { sessionContextWindow, modelRegistry },
+      );
+
+      const waveOverlay = [
+        "## Wave Execution Constraint (plugin overlay)",
+        "",
+        `Carry forward slice goal baseline: ${sliceGoal}`,
+        "",
+        "Before finishing this plan-slice unit:",
+        "- Keep task sizing roughly uniform (target around 30m per task where practical).",
+        "- Add `wave: <number>` frontmatter to every `tasks/Txx-PLAN.md`.",
+        "- Put independent implementation work in earlier waves; verification/regression in later waves.",
+        "- If `gsd_plan_slice` validation fails, fix arguments and retry in the same turn.",
+      ].join("\n");
+
       return {
         action: "dispatch",
-        unitType: "custom-step",
+        unitType: "plan-slice",
         unitId,
-        prompt: `## Wave-Based Execution Optimization (CRITICAL)
-
-You are about to execute slice \`${sid}: ${sTitle}\`. However, the current task plan is not optimized for our execution engine.
-
-**ENGINE CONSTRAINTS (Bulk Synchronous Parallel):**
-Our engine executes tasks in synchronous "waves". It dispatches a batch of tasks simultaneously and **waits for ALL of them to finish** before moving to the next wave.
-If you put one massive task and two tiny tasks in the same wave, the tiny tasks will finish in seconds, and the engine will sit completely idle waiting for the massive task to finish.
-
-**Your Mission:**
-1. **Uniform Task Sizing:** You MUST break down the current coarse tasks in \`${sid}-PLAN.md\` into smaller sub-tasks that are **roughly EQUAL in estimated execution time and complexity**.
-2. **Wave Assignment:** Group independent tasks that can be safely executed in parallel into the same wave.
-3. **Rewrite Files:** Use the \`write\` or \`edit\` tools to rewrite \`${sid}-PLAN.md\` and the \`tasks/Txx-PLAN.md\` files to reflect this new uniform architecture.
-4. **The Proof Marker:** For EVERY \`Txx-PLAN.md\` file, you MUST inject a \`wave: <number>\` field into its YAML frontmatter.
-   - Example format for a task in the first batch:
-     \`\`\`yaml
-     ---
-     wave: 1
-     ---
-     \`\`\`
-   - Tasks in \`wave: 2\` will only start after ALL tasks in \`wave: 1\` are completely finished.
-
-Do NOT start executing the actual code/tasks yet. Only redesign the plan into uniform waves, rewrite the markdown files, and complete your turn.`,
+        prompt: `${waveOverlay}\n\n---\n\n${standardPlanPrompt}`,
       };
+
     },
   };
 
