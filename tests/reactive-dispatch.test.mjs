@@ -17,6 +17,10 @@ function createHarness() {
     `export const DISPATCH_RULES = [
   { name: "executing → execute-task", match: async () => null },
   {
+    name: "planning → plan-slice",
+    match: async () => ({ action: "dispatch", unitType: "plan-slice", unitId: "legacy-plan", prompt: "legacy-plan" }),
+  },
+  {
     name: "executing → reactive-execute (parallel dispatch)",
     match: async () => ({ action: "dispatch", unitType: "reactive-execute", unitId: "legacy", prompt: "legacy" }),
   },
@@ -26,43 +30,11 @@ function createHarness() {
   );
 
   writeFileSync(
-    join(coreDir, "files.js"),
-    `export function splitFrontmatter(content) {
-  if (!content.startsWith("---\\n")) return [null, content];
-  const end = content.indexOf("\\n---\\n", 4);
-  if (end === -1) return [null, content];
-  const frontmatter = content.slice(4, end);
-  const body = content.slice(end + "\\n---\\n".length);
-  return [frontmatter, body];
-}
-
-export function parseFrontmatterMap(frontmatter) {
-  const result = {};
-  for (const rawLine of String(frontmatter).split(/\\r?\\n/)) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) continue;
-    const idx = line.indexOf(":");
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    const rawValue = line.slice(idx + 1).trim();
-    if (/^[-+]?\\d+$/.test(rawValue)) {
-      result[key] = Number(rawValue);
-    } else {
-      result[key] = rawValue;
-    }
-  }
-  return result;
-}
-`,
-    "utf-8",
-  );
-
-  writeFileSync(
     join(coreDir, "gsd-db.js"),
     `const statuses = new Map();
 
 export function __setTaskStatus(mid, sid, tid, status) {
-  statuses.set(\`\${mid}/\${sid}/\${tid}\`, status);
+  statuses.set(mid + "/" + sid + "/" + tid, status);
 }
 
 export function __resetDb() {
@@ -74,7 +46,7 @@ export function isDbAvailable() {
 }
 
 export function getTask(mid, sid, tid) {
-  const status = statuses.get(\`\${mid}/\${sid}/\${tid}\`);
+  const status = statuses.get(mid + "/" + sid + "/" + tid);
   return status ? { status } : null;
 }
 `,
@@ -87,8 +59,8 @@ export function getTask(mid, sid, tid) {
   return "prompt:" + mid + "/" + sid + ":" + selected.join(",");
 }
 
-export async function buildPlanSlicePrompt(mid, midTitle, sid) {
-  return "BASE_PLAN_PROMPT:" + mid + "/" + sid;
+export async function buildPlanSlicePrompt(mid, midTitle, sid, sTitle, basePath, _unused, options) {
+  return "BASE_PLAN_PROMPT:" + mid + "/" + sid + (options?.priorPreExecFailure ? ":WITH_PREEXEC_FAILURE" : "");
 }
 `,
     "utf-8",
@@ -135,36 +107,41 @@ export function __resetReactive() {
   return { runtimeRoot, coreDir };
 }
 
-function writeTaskPlan(tasksDir, taskId, frontmatterLines) {
-  const frontmatter = frontmatterLines.join("\n");
-  const content = `---\n${frontmatter}\n---\n\n# ${taskId}\n`;
+function writeTaskPlan(tasksDir, taskId, body = "") {
+  const content = `---\ntask_id: ${taskId}\n---\n\n# ${taskId}\n\n${body}\n`;
   writeFileSync(join(tasksDir, `${taskId}-PLAN.md`), content, "utf-8");
 }
 
-async function withCapturedStderr(fn) {
-  let captured = "";
-  const originalWrite = process.stderr.write.bind(process.stderr);
-  process.stderr.write = (chunk, encoding, cb) => {
-    const value = typeof chunk === "string" ? chunk : chunk.toString(typeof encoding === "string" ? encoding : undefined);
-    captured += value;
-    if (typeof cb === "function") cb();
-    return true;
-  };
+function writeWaveSidecar(sliceDir, sid, entries) {
+  const rows = entries.map(({ task, wave, why }) => `| ${task} | ${wave} | ${why ?? ""} |`).join("\n");
+  writeFileSync(
+    join(sliceDir, `${sid}-TASK-WAVES.md`),
+    `# ${sid} Task Waves\n\n| Task | Wave | Why |\n|---|---:|---|\n${rows}\n`,
+    "utf-8",
+  );
+}
 
-  try {
-    const result = await fn();
-    return { result, stderr: captured };
-  } finally {
-    process.stderr.write = originalWrite;
-  }
+function createPiHarness() {
+  const notifications = [];
+  return {
+    notifications,
+    pi: {
+      on(eventName, callback) {
+        if (eventName === "session_start") {
+          callback({}, { ui: { notify: (message, level) => notifications.push({ message, level }) } });
+        }
+      },
+    },
+  };
 }
 
 async function prepareRule() {
   const { runtimeRoot, coreDir } = createHarness();
+  const { pi, notifications } = createPiHarness();
   const previousCoreDir = process.env.GSD_CODING_AGENT_DIR;
   process.env.GSD_CODING_AGENT_DIR = runtimeRoot;
   try {
-    await registerForcedReactiveDispatch({});
+    await registerForcedReactiveDispatch(pi);
   } finally {
     if (previousCoreDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
     else process.env.GSD_CODING_AGENT_DIR = previousCoreDir;
@@ -174,16 +151,19 @@ async function prepareRule() {
   const reactiveGraph = await import(pathToFileURL(join(coreDir, "reactive-graph.js")).href);
   const db = await import(pathToFileURL(join(coreDir, "gsd-db.js")).href);
 
+  const planRule = autoDispatch.DISPATCH_RULES.find((entry) => entry?.name === "planning → plan-slice");
+  assert.ok(planRule, "patched plan-slice rule should exist");
+
   const rule = autoDispatch.DISPATCH_RULES.find((entry) => entry?.name === "executing → reactive-execute (parallel dispatch)");
   assert.ok(rule, "patched reactive-execute rule should exist");
 
   const enforceRule = autoDispatch.DISPATCH_RULES.find((entry) => entry?.name === "executing → enforce-wave-breakdown");
-  assert.ok(enforceRule, "wave rewrite enforcement rule should exist");
+  assert.ok(enforceRule, "wave sidecar enforcement rule should exist");
 
-  return { rule, enforceRule, reactiveGraph, db };
+  return { planRule, rule, enforceRule, reactiveGraph, db, notifications };
 }
 
-async function runRule(rule, basePath, prefs = {}) {
+async function runReactiveRule(rule, basePath, prefs = {}) {
   return rule.match({
     state: {
       phase: "executing",
@@ -199,7 +179,32 @@ async function runRule(rule, basePath, prefs = {}) {
   });
 }
 
-test("wave rewrite dispatch reuses standard plan-slice unit with wave overlay constraints", async () => {
+test("initial plan-slice dispatch appends explicit wave sidecar prompt to the standard system prompt", async () => {
+  const { planRule } = await prepareRule();
+
+  const dispatch = await planRule.match({
+    state: {
+      phase: "planning",
+      activeSlice: { id: "S01", title: "Slice 01" },
+    },
+    mid: "M001",
+    midTitle: "Milestone 001",
+    basePath: mkdtempSync(join(tmpdir(), "explicit-reactive-plan-")),
+    sessionContextWindow: 64000,
+    modelRegistry: {},
+    session: {},
+  });
+
+  assert.ok(dispatch, "plan-slice rule should dispatch during planning");
+  assert.equal(dispatch.unitType, "plan-slice");
+  assert.equal(dispatch.unitId, "M001/S01");
+  assert.match(dispatch.prompt, /BASE_PLAN_PROMPT:M001\/S01/, "prompt should retain the standard plan-slice prompt body");
+  assert.match(dispatch.prompt, /Plugin overlay: explicit task waves/, "prompt should include the plugin sidecar overlay on first plan");
+  assert.match(dispatch.prompt, /\.gsd\/milestones\/M001\/slices\/S01\/S01-TASK-WAVES\.md/, "prompt should name the exact sidecar file");
+  assert.match(dispatch.prompt, /Do not add `wave`, `waves`, `execution_wave`/, "prompt should prohibit non-native task frontmatter fields");
+});
+
+test("fallback wave rewrite dispatch sends only the sidecar repair prompt", async () => {
   const { enforceRule } = await prepareRule();
 
   const basePath = mkdtempSync(join(tmpdir(), "explicit-reactive-rewrite-"));
@@ -212,7 +217,7 @@ test("wave rewrite dispatch reuses standard plan-slice unit with wave overlay co
     `# S01\n\n## Goal\nHarden object-pool safety and deterministic optimization outputs.\n\n## Tasks\n- placeholder\n`,
     "utf-8",
   );
-  writeTaskPlan(tasksDir, "T01", ["owner: planner"]); // wave missing => force rewrite dispatch
+  writeTaskPlan(tasksDir, "T01", "Independent implementation task.");
 
   const dispatch = await enforceRule.match({
     state: {
@@ -226,39 +231,38 @@ test("wave rewrite dispatch reuses standard plan-slice unit with wave overlay co
     modelRegistry: {},
   });
 
-  assert.ok(dispatch, "enforce-wave-breakdown should dispatch when wave metadata is missing");
-  assert.equal(dispatch.unitType, "plan-slice", "rewrite should reuse standard plan-slice unit type");
-  assert.equal(dispatch.unitId, "M001/S01", "rewrite should reuse standard plan-slice unit id");
-  assert.match(dispatch.prompt, /Wave Execution Constraint/, "prompt should include wave overlay header");
-  assert.match(dispatch.prompt, /gsd_plan_slice/, "overlay should reinforce gsd_plan_slice persistence");
-  assert.match(dispatch.prompt, /BASE_PLAN_PROMPT:M001\/S01/, "prompt should include standard plan-slice prompt body");
-  assert.match(
-    dispatch.prompt,
-    /Harden object-pool safety and deterministic optimization outputs\./,
-    "overlay should carry parsed goal text from the existing slice plan",
-  );
+  assert.ok(dispatch, "enforce-wave-breakdown should dispatch when the sidecar is missing");
+  assert.equal(dispatch.unitType, "plan-slice", "fallback still reuses a plan-slice unit shell");
+  assert.equal(dispatch.unitId, "M001/S01");
+  assert.match(dispatch.prompt, /^# Repair explicit task waves sidecar/, "fallback prompt should be the plugin repair prompt");
+  assert.doesNotMatch(dispatch.prompt, /BASE_PLAN_PROMPT:M001\/S01/, "fallback prompt must not resend the standard plan-slice prompt");
+  assert.match(dispatch.prompt, /S01-TASK-WAVES\.md/, "repair prompt should name the canonical sidecar");
+  assert.match(dispatch.prompt, /`T01-PLAN\.md`/, "repair prompt should include the current task plan set");
+  assert.match(dispatch.prompt, /Harden object-pool safety and deterministic optimization outputs\./, "repair prompt should carry parsed goal text");
 });
 
-test("reactive batch selection is deterministic, truncated at 8, and persisted with stable state semantics", async () => {
+test("reactive batch selection reads waves from the single sidecar, is deterministic, truncated at 8, and persisted", async () => {
   const { rule, reactiveGraph, db } = await prepareRule();
   db.__resetDb();
   reactiveGraph.__resetReactive();
 
   const basePath = mkdtempSync(join(tmpdir(), "explicit-reactive-repo-"));
-  const tasksDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+  const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
+  const tasksDir = join(sliceDir, "tasks");
   mkdirSync(tasksDir, { recursive: true });
 
-  // Intentionally unsorted file creation order.
-  for (const taskId of ["T10", "T09", "T08", "T07", "T06", "T05", "T04", "T03", "T02", "T1", "T01"]) {
-    writeTaskPlan(tasksDir, taskId, ["wave: 1"]);
+  const taskIds = ["T10", "T09", "T08", "T07", "T06", "T05", "T04", "T03", "T02", "T1", "T01"];
+  for (const taskId of taskIds) {
+    writeTaskPlan(tasksDir, taskId);
   }
+  writeWaveSidecar(sliceDir, "S01", taskIds.map((task) => ({ task, wave: 1, why: "same wave for deterministic truncation test" })));
 
   // Closed statuses should be excluded from pending and included in completed.
   db.__setTaskStatus("M001", "S01", "T03", "complete");
   db.__setTaskStatus("M001", "S01", "T04", "skipped");
 
-  const dispatch = await runRule(rule, basePath);
-  assert.ok(dispatch, "reactive rule should dispatch a batch when wave has multiple runnable tasks");
+  const dispatch = await runReactiveRule(rule, basePath);
+  assert.ok(dispatch, "reactive rule should dispatch a batch when sidecar wave has multiple runnable tasks");
   assert.equal(dispatch.unitType, "reactive-execute");
   assert.equal(
     dispatch.unitId,
@@ -287,17 +291,19 @@ test("reactive batch selection is deterministic, truncated at 8, and persisted w
   assert.equal(clears.length, 0, "state should not be cleared on successful reactive dispatch");
 });
 
-test("invalid/missing wave metadata degrades safely: no dispatch, no state write, stale state cleared", async () => {
-  const { rule, reactiveGraph, db } = await prepareRule();
+test("invalid/missing wave sidecar degrades safely: no dispatch, no state write, stale state cleared", async () => {
+  const { rule, reactiveGraph, db, notifications } = await prepareRule();
   db.__resetDb();
   reactiveGraph.__resetReactive();
 
   const basePath = mkdtempSync(join(tmpdir(), "explicit-reactive-repo-"));
-  const tasksDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+  const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
+  const tasksDir = join(sliceDir, "tasks");
   mkdirSync(tasksDir, { recursive: true });
 
-  writeTaskPlan(tasksDir, "T01", ["wave: 1"]);
-  writeTaskPlan(tasksDir, "T02", ["owner: planner"]); // wave missing on purpose
+  writeTaskPlan(tasksDir, "T01");
+  writeTaskPlan(tasksDir, "T02");
+  writeWaveSidecar(sliceDir, "S01", [{ task: "T01", wave: 1, why: "T02 intentionally missing" }]);
 
   // Seed one stale state entry to verify clearReactiveState fallback path is exercised.
   reactiveGraph.saveReactiveState(basePath, "M001", "S01", {
@@ -309,45 +315,53 @@ test("invalid/missing wave metadata degrades safely: no dispatch, no state write
   });
   const saveCountBefore = reactiveGraph.__getSaves().length;
 
-  const { result, stderr } = await withCapturedStderr(() => runRule(rule, basePath));
-  assert.equal(result, null, "rule should fall back to sequential path when wave metadata is invalid");
+  const result = await runReactiveRule(rule, basePath);
+  assert.equal(result, null, "rule should fall back to sequential path when sidecar metadata is invalid");
 
   const saveCountAfter = reactiveGraph.__getSaves().length;
-  assert.equal(saveCountAfter, saveCountBefore, "invalid metadata path must not write a new reactive state snapshot");
+  assert.equal(saveCountAfter, saveCountBefore, "invalid sidecar path must not write a new reactive state snapshot");
 
   const clears = reactiveGraph.__getClears();
-  assert.equal(clears.length, 1, "invalid metadata should clear stale reactive state to avoid pollution");
+  assert.equal(clears.length, 1, "invalid sidecar should clear stale reactive state to avoid pollution");
   assert.equal(clears[0].mid, "M001");
   assert.equal(clears[0].sid, "S01");
 
-  assert.match(stderr, /phase=reactive-dispatch cause=wave-metadata-invalid/, "diagnostics should expose invalid wave metadata cause");
-  assert.match(stderr, /phase=reactive-dispatch cause=state-cleared/, "diagnostics should expose state clear fallback");
+  const messages = notifications.map((entry) => entry.message).join("\n");
+  assert.match(messages, /reactive-dispatch wave-sidecar-invalid/, "diagnostics should expose invalid sidecar cause");
+  assert.match(messages, /wave-sidecar-task-set-mismatch/, "diagnostics should expose task set mismatch reason");
+  assert.match(messages, /reactive-dispatch state-cleared/, "diagnostics should expose state clear fallback");
 });
 
-test("when no pending wave tasks remain, reactive state is cleared instead of persisting stale batch data", async () => {
-  const { rule, reactiveGraph, db } = await prepareRule();
+test("when no pending sidecar wave tasks remain, reactive state is cleared instead of persisting stale batch data", async () => {
+  const { rule, reactiveGraph, db, notifications } = await prepareRule();
   db.__resetDb();
   reactiveGraph.__resetReactive();
 
   const basePath = mkdtempSync(join(tmpdir(), "explicit-reactive-repo-"));
-  const tasksDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+  const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
+  const tasksDir = join(sliceDir, "tasks");
   mkdirSync(tasksDir, { recursive: true });
 
-  writeTaskPlan(tasksDir, "T01", ["wave: 1"]);
-  writeTaskPlan(tasksDir, "T02", ["wave: 1"]);
+  writeTaskPlan(tasksDir, "T01");
+  writeTaskPlan(tasksDir, "T02");
+  writeWaveSidecar(sliceDir, "S01", [
+    { task: "T01", wave: 1, why: "done" },
+    { task: "T02", wave: 1, why: "done" },
+  ]);
 
   db.__setTaskStatus("M001", "S01", "T01", "done");
   db.__setTaskStatus("M001", "S01", "T02", "complete");
 
-  const { result, stderr } = await withCapturedStderr(() => runRule(rule, basePath));
+  const result = await runReactiveRule(rule, basePath);
   assert.equal(result, null, "no pending tasks should fall through to default sequential dispatch rule");
 
   assert.equal(reactiveGraph.__getSaves().length, 0, "no pending tasks should not write a new reactive state snapshot");
   assert.equal(reactiveGraph.__getClears().length, 1, "no pending tasks should clear stale state");
-  assert.match(stderr, /reason=no-pending-wave-tasks/, "diagnostics should explain why reactive state was cleared");
+  const messages = notifications.map((entry) => entry.message).join("\n");
+  assert.match(messages, /reason=no-pending-wave-tasks/, "diagnostics should explain why reactive state was cleared");
 });
 
-test("module import failure remains fail-loud with standardized plugin/phase/cause diagnostics", async () => {
+test("module import failure remains fail-loud with standardized plugin phase/cause diagnostics", async () => {
   const runtimeRoot = mkdtempSync(join(tmpdir(), "explicit-reactive-broken-core-"));
   const coreDir = join(runtimeRoot, "extensions", "gsd");
   mkdirSync(coreDir, { recursive: true });
@@ -355,16 +369,9 @@ test("module import failure remains fail-loud with standardized plugin/phase/cau
   writeFileSync(
     join(coreDir, "auto-dispatch.js"),
     `export const DISPATCH_RULES = [
+  { name: "planning → plan-slice", match: async () => null },
   { name: "executing → reactive-execute (parallel dispatch)", match: async () => null },
 ];
-`,
-    "utf-8",
-  );
-
-  writeFileSync(
-    join(coreDir, "files.js"),
-    `export function splitFrontmatter(content) { return [null, content]; }
-export function parseFrontmatterMap() { return {}; }
 `,
     "utf-8",
   );
@@ -394,15 +401,17 @@ export function clearReactiveState() {}
     "utf-8",
   );
 
+  const { pi, notifications } = createPiHarness();
   const previousCoreDir = process.env.GSD_CODING_AGENT_DIR;
   process.env.GSD_CODING_AGENT_DIR = runtimeRoot;
 
   try {
-    const { stderr } = await withCapturedStderr(() => registerForcedReactiveDispatch({}));
+    await registerForcedReactiveDispatch(pi);
 
-    assert.match(stderr, /plugin=gsd-explicit-reactive phase=module-discovery cause=core-path-selected/);
-    assert.match(stderr, /plugin=gsd-explicit-reactive phase=module-load cause=core-modules-import-failed/);
-    assert.doesNotMatch(stderr, /phase=patch-mount cause=mounted/);
+    const messages = notifications.map((entry) => entry.message).join("\n");
+    assert.match(messages, /module-discovery core-path-selected/);
+    assert.match(messages, /module-load core-modules-import-failed/);
+    assert.doesNotMatch(messages, /patch-mount mounted/);
   } finally {
     if (previousCoreDir === undefined) delete process.env.GSD_CODING_AGENT_DIR;
     else process.env.GSD_CODING_AGENT_DIR = previousCoreDir;

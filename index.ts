@@ -9,7 +9,6 @@ const TASK_ID_COLLATOR = new Intl.Collator("en", { numeric: true, sensitivity: "
 
 const REQUIRED_MODULES = [
   "auto-dispatch",
-  "files",
   "gsd-db",
   "auto-prompts",
   "reactive-graph",
@@ -76,28 +75,171 @@ function sortTaskPlanFiles(files: string[]): string[] {
   });
 }
 
-function parseWaveMeta(rawWave: unknown): { wave: number | null; reason: string | null } {
-  if (rawWave === undefined || rawWave === null) {
-    return { wave: null, reason: "wave-missing" };
-  }
+const WAVE_SIDECAR_SUFFIX = "-TASK-WAVES.md";
 
-  const normalized = typeof rawWave === "string" ? rawWave.trim() : rawWave;
+type WaveParseFailure = {
+  reason: string;
+  detail?: string;
+};
+
+type WavePlanResult =
+  | { ok: true; path: string; relPath: string; waves: Map<string, number> }
+  | { ok: false; path: string; relPath: string; reason: string; detail?: string };
+
+function waveSidecarFileName(sid: string): string {
+  return `${sid}${WAVE_SIDECAR_SUFFIX}`;
+}
+
+function waveSidecarAbsPath(basePath: string, mid: string, sid: string): string {
+  return join(basePath, ".gsd", "milestones", mid, "slices", sid, waveSidecarFileName(sid));
+}
+
+function waveSidecarRelPath(mid: string, sid: string): string {
+  return join(".gsd", "milestones", mid, "slices", sid, waveSidecarFileName(sid));
+}
+
+function parseWaveNumber(rawWave: string): { wave: number | null; reason: string | null } {
+  const normalized = rawWave.trim().replace(/^`|`$/g, "");
   if (normalized === "") {
     return { wave: null, reason: "wave-empty" };
   }
+  if (!/^\d+$/.test(normalized)) {
+    return { wave: null, reason: "wave-non-integer" };
+  }
 
   const numericWave = Number(normalized);
-  if (!Number.isFinite(numericWave)) {
-    return { wave: null, reason: "wave-non-finite" };
-  }
-  if (!Number.isInteger(numericWave)) {
-    return { wave: null, reason: "wave-non-integer" };
+  if (!Number.isSafeInteger(numericWave)) {
+    return { wave: null, reason: "wave-unsafe-integer" };
   }
   if (numericWave < 1) {
     return { wave: null, reason: "wave-out-of-range" };
   }
 
   return { wave: numericWave, reason: null };
+}
+
+function normalizeTableCell(value: string): string {
+  return value.trim().replace(/^`|`$/g, "").trim();
+}
+
+function parseWaveSidecar(content: string): { waves: Map<string, number>; failures: WaveParseFailure[] } {
+  const waves = new Map<string, number>();
+  const failures: WaveParseFailure[] = [];
+
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("|") || !line.endsWith("|")) continue;
+
+    const cells = line
+      .slice(1, -1)
+      .split("|")
+      .map(normalizeTableCell);
+
+    if (cells.length < 2) continue;
+
+    const taskCell = cells[0];
+    const waveCell = cells[1];
+    if (/^task$/i.test(taskCell) && /^wave$/i.test(waveCell)) continue;
+    if (/^:?-{3,}:?$/.test(taskCell) || /^:?-{3,}:?$/.test(waveCell)) continue;
+
+    if (!/^[A-Za-z0-9_-]+$/.test(taskCell)) {
+      failures.push({ reason: "task-id-invalid", detail: taskCell });
+      continue;
+    }
+
+    const parsedWave = parseWaveNumber(waveCell);
+    if (parsedWave.wave === null) {
+      failures.push({ reason: parsedWave.reason ?? "wave-invalid", detail: `${taskCell}:${waveCell}` });
+      continue;
+    }
+
+    if (waves.has(taskCell)) {
+      failures.push({ reason: "task-duplicated", detail: taskCell });
+      continue;
+    }
+
+    waves.set(taskCell, parsedWave.wave);
+  }
+
+  if (waves.size === 0 && failures.length === 0) {
+    failures.push({ reason: "no-wave-table-rows" });
+  }
+
+  return { waves, failures };
+}
+
+function loadWavePlan(basePath: string, mid: string, sid: string, taskIds: string[]): WavePlanResult {
+  const sliceDir = join(basePath, ".gsd", "milestones", mid, "slices", sid);
+  const expectedFileName = waveSidecarFileName(sid);
+  const expectedPath = waveSidecarAbsPath(basePath, mid, sid);
+  const expectedRelPath = waveSidecarRelPath(mid, sid);
+
+  let sidecars: string[] = [];
+  try {
+    sidecars = readdirSync(sliceDir).filter((file) => file.endsWith(WAVE_SIDECAR_SUFFIX));
+  } catch (err) {
+    return {
+      ok: false,
+      path: expectedPath,
+      relPath: expectedRelPath,
+      reason: "slice-dir-read-failed",
+      detail: errMessage(err),
+    };
+  }
+
+  if (sidecars.length === 0) {
+    return { ok: false, path: expectedPath, relPath: expectedRelPath, reason: "wave-sidecar-missing" };
+  }
+
+  if (sidecars.length !== 1 || sidecars[0] !== expectedFileName) {
+    return {
+      ok: false,
+      path: expectedPath,
+      relPath: expectedRelPath,
+      reason: "wave-sidecar-count-invalid",
+      detail: sidecars.sort().join(",") || "<none>",
+    };
+  }
+
+  let content = "";
+  try {
+    content = readFileSync(expectedPath, "utf-8");
+  } catch (err) {
+    return {
+      ok: false,
+      path: expectedPath,
+      relPath: expectedRelPath,
+      reason: "wave-sidecar-read-failed",
+      detail: errMessage(err),
+    };
+  }
+
+  const parsed = parseWaveSidecar(content);
+  if (parsed.failures.length > 0) {
+    return {
+      ok: false,
+      path: expectedPath,
+      relPath: expectedRelPath,
+      reason: "wave-sidecar-parse-failed",
+      detail: parsed.failures.map((failure) => `${failure.reason}${failure.detail ? `:${failure.detail}` : ""}`).join(" | "),
+    };
+  }
+
+  const known = new Set(taskIds);
+  const unknown = [...parsed.waves.keys()].filter((taskId) => !known.has(taskId)).sort(compareTaskIds);
+  const missing = taskIds.filter((taskId) => !parsed.waves.has(taskId)).sort(compareTaskIds);
+
+  if (unknown.length > 0 || missing.length > 0) {
+    return {
+      ok: false,
+      path: expectedPath,
+      relPath: expectedRelPath,
+      reason: "wave-sidecar-task-set-mismatch",
+      detail: `missing=${missing.join(",") || "<none>"}; unknown=${unknown.join(",") || "<none>"}`,
+    };
+  }
+
+  return { ok: true, path: expectedPath, relPath: expectedRelPath, waves: parsed.waves };
 }
 
 function extractGoalFromPlan(content: string): string | null {
@@ -143,6 +285,65 @@ function readSliceGoalOrFallback(basePath: string, mid: string, sid: string, fal
     });
     return fallback;
   }
+}
+
+function buildWaveSidecarInitialPrompt(mid: string, sid: string): string {
+  const sidecarRelPath = waveSidecarRelPath(mid, sid);
+  return [
+    "## Plugin overlay: explicit task waves for parallel execution",
+    "",
+    "Keep all normal GSD plan-slice requirements from the prompt above. In addition, record the parallel execution plan in a dedicated sidecar file instead of task frontmatter.",
+    "",
+    "Required behavior:",
+    "1. Plan the slice normally and call `gsd_plan_slice` with the task list. Keep task sizes roughly uniform (target about 30 minutes where practical).",
+    `2. After task plan files exist, create or replace exactly one wave sidecar file: \`${sidecarRelPath}\`.`,
+    "3. Do not add `wave`, `waves`, `execution_wave`, or any other plugin-only field to task-plan frontmatter. The sidecar is the only source of wave metadata.",
+    "4. Every `tasks/Txx-PLAN.md` in this slice must appear exactly once in the sidecar; do not include unknown task IDs.",
+    `5. Assign positive integer waves. Tasks in the same wave must be safe to execute concurrently; put dependent tasks, integration checks, and regression verification in later waves. Prefer useful parallelism up to ${FORCED_MAX_PARALLEL} tasks per wave, but choose correctness over concurrency.`,
+    "",
+    "Use this exact sidecar shape:",
+    "",
+    "```markdown",
+    `# ${sid} Task Waves`,
+    "",
+    "| Task | Wave | Why |",
+    "|---|---:|---|",
+    "| T01 | 1 | Independent setup or implementation work. |",
+    "| T02 | 1 | Independent of T01; can run in parallel. |",
+    "| T03 | 2 | Depends on wave 1 outputs or performs integration verification. |",
+    "```",
+  ].join("\n");
+}
+
+function buildWaveSidecarRepairPrompt(params: {
+  mid: string;
+  sid: string;
+  sTitle: string;
+  sliceGoal: string;
+  taskIds: string[];
+  wavePlan: WavePlanResult;
+}): string {
+  const { mid, sid, sTitle, sliceGoal, taskIds, wavePlan } = params;
+  return [
+    "# Repair explicit task waves sidecar",
+    "",
+    "This is a fallback repair dispatch from the `gsd-explicit-reactive` plugin. Do not redo the full plan-slice prompt; repair only the wave sidecar unless you discover that the task plans themselves are missing.",
+    "",
+    `- Milestone: ${mid}`,
+    `- Slice: ${sid} — ${sTitle}`,
+    `- Slice goal baseline: ${sliceGoal}`,
+    `- Required sidecar path: \`${wavePlan.relPath}\``,
+    `- Current diagnostic: ${wavePlan.reason}${wavePlan.detail ? ` (${wavePlan.detail})` : ""}`,
+    `- Current task plan files: ${taskIds.length > 0 ? taskIds.map((taskId) => `\`${taskId}-PLAN.md\``).join(", ") : "(none found)"}`,
+    "",
+    "Required repair:",
+    `1. Create or replace exactly one file at \`${wavePlan.relPath}\`. If another \`*${WAVE_SIDECAR_SUFFIX}\` file exists in this slice directory, remove it so the canonical file is the only sidecar.`,
+    "2. Use a Markdown table with columns `Task`, `Wave`, and `Why`.",
+    "3. Include every listed task exactly once and no unknown task IDs.",
+    "4. Use positive integer waves only. Tasks in the same wave must be safe for concurrent execution; place dependent, integration, and regression tasks in later waves.",
+    "5. Do not add or modify wave metadata in any task-plan frontmatter. The sidecar is the sole wave source.",
+    "6. If task dependencies are unclear, read the listed task plan files and choose conservative later waves rather than unsafe parallelism.",
+  ].join("\n");
 }
 
 function clearReactiveStateSafely(
@@ -291,7 +492,6 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
   }
 
   const autoDispatch = loadedModules["auto-dispatch"];
-  const filesModule = loadedModules["files"];
   const dbModule = loadedModules["gsd-db"];
   const promptsModule = loadedModules["auto-prompts"];
   const reactiveGraph = loadedModules["reactive-graph"];
@@ -327,16 +527,52 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
     return;
   }
 
-  if (typeof filesModule?.splitFrontmatter !== "function" || typeof filesModule?.parseFrontmatterMap !== "function") {
-    logDispatchDiagnostic("module-load", "contract-mismatch", "files module missing frontmatter helpers", {
-      module: "files",
-    });
-    return;
-  }
+  const initialWavePlanRule = {
+    name: "planning → plan-slice",
+    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, session }: any) => {
+      if (state.phase !== "planning") return null;
+      if (!state.activeSlice) {
+        return {
+          action: "stop",
+          reason: `${mid}: phase "${state.phase}" has no active slice — run /gsd doctor.`,
+          level: "error",
+        };
+      }
+
+      const sid = state.activeSlice.id;
+      const sTitle = state.activeSlice.title;
+      const unitId = `${mid}/${sid}`;
+      let priorPreExecFailure;
+      if (session?.lastPreExecFailure?.unitId === unitId) {
+        priorPreExecFailure = {
+          blockingFindings: session.lastPreExecFailure.blockingFindings,
+          verdictExcerpt: session.lastPreExecFailure.verdictExcerpt,
+        };
+        session.lastPreExecFailure = null;
+      }
+
+      const standardPlanPrompt = await promptsModule.buildPlanSlicePrompt(
+        mid,
+        midTitle,
+        sid,
+        sTitle,
+        basePath,
+        undefined,
+        { sessionContextWindow, modelRegistry, priorPreExecFailure },
+      );
+
+      return {
+        action: "dispatch",
+        unitType: "plan-slice",
+        unitId,
+        prompt: `${standardPlanPrompt}\n\n---\n\n${buildWaveSidecarInitialPrompt(mid, sid)}`,
+      };
+    },
+  };
 
   const enforceWaveBreakdownRule = {
     name: "executing → enforce-wave-breakdown",
-    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry }: any) => {
+    match: async ({ state, mid, basePath }: any) => {
       if (state.phase !== "executing" || !state.activeSlice) return null;
 
       const sid = state.activeSlice.id;
@@ -347,7 +583,7 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
       try {
         files = sortTaskPlanFiles(readdirSync(tasksDir).filter((f) => f.endsWith("-PLAN.md")));
       } catch (err) {
-        logDispatchDiagnostic("wave-rewrite", "tasks-dir-read-failed", "Unable to scan task plans for wave rewrite gate", {
+        logDispatchDiagnostic("wave-rewrite", "tasks-dir-read-failed", "Unable to scan task plans for wave sidecar gate", {
           mid,
           sid,
           tasksDir,
@@ -356,94 +592,36 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
         return null;
       }
 
-      let needsOptimization = false;
-      for (const file of files) {
-        const tid = taskIdFromPlanFile(file) ?? file.replace("-PLAN.md", "");
-        const taskPath = join(tasksDir, file);
-        let content = "";
-        try {
-          content = readFileSync(taskPath, "utf-8");
-        } catch (err) {
-          logDispatchDiagnostic("wave-rewrite", "task-plan-read-failed", "Failed reading task plan while checking wave annotations", {
-            mid,
-            sid,
-            tid,
-            taskPath,
-            error: errMessage(err),
-          });
-          return null;
-        }
+      const taskIds = files
+        .map((file) => taskIdFromPlanFile(file) ?? file.replace("-PLAN.md", ""))
+        .sort(compareTaskIds);
+      const wavePlan = loadWavePlan(basePath, mid, sid, taskIds);
+      if (wavePlan.ok) return null;
 
-        let meta: Record<string, unknown> = {};
-        try {
-          const [fm] = filesModule.splitFrontmatter(content);
-          meta = fm ? filesModule.parseFrontmatterMap(fm) : {};
-        } catch (err) {
-          logDispatchDiagnostic("wave-rewrite", "frontmatter-parse-failed", "Failed to parse task frontmatter while checking wave annotations", {
-            mid,
-            sid,
-            tid,
-            taskPath,
-            error: errMessage(err),
-          });
-          needsOptimization = true;
-          break;
-        }
-
-        const waveMeta = parseWaveMeta(meta.wave);
-        if (waveMeta.wave === null) {
-          logDispatchDiagnostic("wave-rewrite", waveMeta.reason ?? "wave-invalid", "Detected task without valid wave metadata; forcing rewrite", {
-            mid,
-            sid,
-            tid,
-            taskPath,
-            rawWave: meta.wave,
-          });
-          needsOptimization = true;
-          break;
-        }
-      }
-
-      if (!needsOptimization) return null;
+      logDispatchDiagnostic("wave-rewrite", wavePlan.reason, "Detected missing or invalid task wave sidecar; dispatching fallback repair prompt", {
+        mid,
+        sid,
+        sidecar: wavePlan.relPath,
+        taskPlanCount: taskIds.length,
+        detail: wavePlan.detail,
+      });
 
       const sliceGoal = readSliceGoalOrFallback(basePath, mid, sid, sTitle);
       const unitId = `${mid}/${sid}`;
-      logDispatchDiagnostic("wave-rewrite", "dispatch", "Dispatching wave rewrite via standard plan-slice unit", {
-        mid,
-        sid,
-        unitId,
-        taskPlanCount: files.length,
-      });
-
-      const standardPlanPrompt = await promptsModule.buildPlanSlicePrompt(
-        mid,
-        midTitle ?? mid,
-        sid,
-        sTitle,
-        basePath,
-        undefined,
-        { sessionContextWindow, modelRegistry },
-      );
-
-      const waveOverlay = [
-        "## Wave Execution Constraint (plugin overlay)",
-        "",
-        `Carry forward slice goal baseline: ${sliceGoal}`,
-        "",
-        "Before finishing this plan-slice unit:",
-        "- Keep task sizing roughly uniform (target around 30m per task where practical).",
-        "- Add `wave: <number>` frontmatter to every `tasks/Txx-PLAN.md`.",
-        "- Put independent implementation work in earlier waves; verification/regression in later waves.",
-        "- If `gsd_plan_slice` validation fails, fix arguments and retry in the same turn.",
-      ].join("\n");
 
       return {
         action: "dispatch",
         unitType: "plan-slice",
         unitId,
-        prompt: `${waveOverlay}\n\n---\n\n${standardPlanPrompt}`,
+        prompt: buildWaveSidecarRepairPrompt({
+          mid,
+          sid,
+          sTitle,
+          sliceGoal,
+          taskIds,
+          wavePlan,
+        }),
       };
-
     },
   };
 
@@ -473,14 +651,31 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
         return null;
       }
 
+      const taskIds = files
+        .map((file) => taskIdFromPlanFile(file) ?? file.replace("-PLAN.md", ""))
+        .sort(compareTaskIds);
+      const wavePlan = loadWavePlan(basePath, mid, sid, taskIds);
+      if (!wavePlan.ok) {
+        logDispatchDiagnostic("reactive-dispatch", "wave-sidecar-invalid", "Skipping forced reactive dispatch due to missing or invalid task wave sidecar", {
+          mid,
+          sid,
+          fallback: "sequential",
+          sidecar: wavePlan.relPath,
+          reason: wavePlan.reason,
+          detail: wavePlan.detail,
+        });
+
+        clearReactiveStateSafely(reactiveGraph, basePath, mid, sid, "invalid-wave-sidecar", {
+          reason: wavePlan.reason,
+        });
+        return null;
+      }
+
       const completed = new Set<string>();
       const pendingTasks: Array<{ id: string; wave: number }> = [];
-      const invalidWaveMeta: Array<{ id: string; reason: string; rawWave: unknown }> = [];
       const dbAvailable = typeof dbModule?.isDbAvailable === "function" && dbModule.isDbAvailable();
 
-      for (const file of files) {
-        const tid = taskIdFromPlanFile(file) ?? file.replace("-PLAN.md", "");
-
+      for (const tid of taskIds) {
         let done = false;
         if (dbAvailable && typeof dbModule?.getTask === "function") {
           const dbTask = dbModule.getTask(mid, sid, tid);
@@ -494,65 +689,7 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
           continue;
         }
 
-        const taskPath = join(tasksDir, file);
-        let content = "";
-        try {
-          content = readFileSync(taskPath, "utf-8");
-        } catch (err) {
-          logDispatchDiagnostic("reactive-dispatch", "task-plan-read-failed", "Failed reading task plan during forced reactive dispatch", {
-            mid,
-            sid,
-            tid,
-            taskPath,
-            error: errMessage(err),
-          });
-          return null;
-        }
-
-        let meta: Record<string, unknown> = {};
-        try {
-          const [fm] = filesModule.splitFrontmatter(content);
-          meta = fm ? filesModule.parseFrontmatterMap(fm) : {};
-        } catch (err) {
-          invalidWaveMeta.push({
-            id: tid,
-            reason: "frontmatter-parse-failed",
-            rawWave: errMessage(err),
-          });
-          continue;
-        }
-
-        const waveMeta = parseWaveMeta(meta.wave);
-        if (waveMeta.wave === null) {
-          invalidWaveMeta.push({
-            id: tid,
-            reason: waveMeta.reason ?? "wave-invalid",
-            rawWave: meta.wave,
-          });
-          continue;
-        }
-
-        pendingTasks.push({ id: tid, wave: waveMeta.wave });
-      }
-
-      if (invalidWaveMeta.length > 0) {
-        const invalidTasks = [...invalidWaveMeta]
-          .sort((a, b) => compareTaskIds(a.id, b.id) || a.reason.localeCompare(b.reason))
-          .map((entry) => `${entry.id}:${entry.reason}`)
-          .join(" | ");
-
-        logDispatchDiagnostic("reactive-dispatch", "wave-metadata-invalid", "Skipping forced reactive dispatch due to invalid wave metadata", {
-          mid,
-          sid,
-          fallback: "sequential",
-          invalidCount: invalidWaveMeta.length,
-          invalidTasks,
-        });
-
-        clearReactiveStateSafely(reactiveGraph, basePath, mid, sid, "invalid-wave-metadata", {
-          invalidCount: invalidWaveMeta.length,
-        });
-        return null;
+        pendingTasks.push({ id: tid, wave: wavePlan.waves.get(tid)! });
       }
 
       const completedSorted = uniqueSortedTaskIds([...completed]);
@@ -724,6 +861,18 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
     });
   }
 
+  const planRuleIndex = DISPATCH_RULES.findIndex((rule: any) => rule?.name === initialWavePlanRule.name);
+  if (planRuleIndex === -1) {
+    logDispatchDiagnostic("patch-mount", "plan-rule-missing", "Failed to locate plan-slice dispatch rule for wave sidecar prompt overlay", {
+      availableRules: DISPATCH_RULES
+        .map((rule: any) => (typeof rule?.name === "string" ? rule.name : "<unnamed>"))
+        .join(" | "),
+    });
+    return;
+  }
+
+  DISPATCH_RULES[planRuleIndex] = initialWavePlanRule;
+
   const reactiveRuleIndex = DISPATCH_RULES.findIndex(isReactiveDispatchRule);
 
   if (reactiveRuleIndex === -1) {
@@ -739,7 +888,9 @@ export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
   DISPATCH_RULES.splice(reactiveRuleIndex, 0, enforceWaveBreakdownRule);
 
   logDispatchDiagnostic("patch-mount", "mounted", "Forced dispatch takeover mounted successfully", {
+    planRuleIndex,
     reactiveRuleIndex,
     enforcedParallel: FORCED_MAX_PARALLEL,
+    waveSidecar: waveSidecarFileName("<slice>"),
   });
 }
