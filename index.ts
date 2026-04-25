@@ -24,17 +24,7 @@ function errMessage(err: unknown): string {
   return String(err);
 }
 
-function normalizeDetail(value: unknown): string {
-  if (value === undefined) return "undefined";
-  if (value === null) return "null";
-  if (typeof value === "string") return value.replace(/\s+/g, " ").trim();
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
-  try {
-    return JSON.stringify(value).replace(/\s+/g, " ").trim();
-  } catch {
-    return "[unserializable]";
-  }
-}
+let capturedCtx: any = null;
 
 function logDispatchDiagnostic(
   phase: string,
@@ -42,12 +32,14 @@ function logDispatchDiagnostic(
   message: string,
   details: Record<string, unknown> = {},
 ): void {
+  if (!capturedCtx?.ui?.notify) return;
   const detailPairs = Object.entries(details)
     .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${k}=${normalizeDetail(v)}`);
+    .map(([k, v]) => `${k}=${String(v)}`);
   const suffix = detailPairs.length > 0 ? ` ${detailPairs.join(" ")}` : "";
-  process.stderr.write(
-    `[dispatch-diagnostic plugin=${PLUGIN_NAME} phase=${phase} cause=${cause}] ${message}${suffix}\n`,
+  capturedCtx.ui.notify(
+    `[dispatch] ${phase} ${cause} ${message}${suffix}`,
+    "info"
   );
 }
 
@@ -265,8 +257,9 @@ async function loadCoreModules(corePath: string): Promise<LoadedModules> {
 }
 
 export default async function registerForcedReactiveDispatch(pi: ExtensionAPI) {
-  // keep signature for extension loader; `pi` is intentionally unused here
-  void pi;
+  pi.on("session_start", async (_event, ctx) => {
+    capturedCtx = ctx;
+  });
 
   logDispatchDiagnostic("module-discovery", "start", "Starting forced dispatch initialization", {
     forcedMaxParallel: FORCED_MAX_PARALLEL,
