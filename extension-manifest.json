@@ -6,5 +6,8 @@
   "tier": "community",
   "requires": {
     "platform": "any"
+  },
+  "provides": {
+    "hooks": ["session_start"]
   }
 }

@@ -3,12 +3,20 @@
   "version": "2.0.0",
   "description": "Embraces GSD's Bulk Synchronous Parallel engine by forcing uniform task sizing and explicit wave-based execution batches.",
   "type": "module",
+  "keywords": [
+    "pi-package",
+    "gsd-extension"
+  ],
   "gsd": {
     "extension": true
   },
   "pi": {
     "extensions": [
-      "index.ts"
+      "./index.ts"
     ]
+  },
+  "peerDependencies": {
+    "@gsd/pi-coding-agent": "*",
+    "@gsd/pi-tui": "*"
   }
 }

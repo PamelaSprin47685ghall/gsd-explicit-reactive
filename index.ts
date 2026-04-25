@@ -1,34 +1,66 @@
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-export default async function registerExtension(pi: ExtensionAPI) {
-  // 1. 动态加载 GSD 内部模块
-  // 适配不同的部署环境，优先从环境变量获取 GSD 核心路径
-  const gsdCorePath = (process.env.GSD_CODING_AGENT_DIR ? join(process.env.GSD_CODING_AGENT_DIR, 'extensions', 'gsd') : null) ||
-                     (process.env.GSD_PKG_ROOT ? join(process.env.GSD_PKG_ROOT, 'dist/resources/extensions/gsd') : '../gsd');
+export default async function (pi: ExtensionAPI) {
+  // 1. 动态加载 GSD 内部模块 (健壮性增强：多路径探测 + JS/TS 自动识别)
+  const possiblePaths = [
+    process.env.GSD_CODING_AGENT_DIR ? join(process.env.GSD_CODING_AGENT_DIR, 'extensions', 'gsd') : null,
+    process.env.GSD_PKG_ROOT ? join(process.env.GSD_PKG_ROOT, 'dist/resources/extensions/gsd') : null,
+    process.env.GSD_PKG_ROOT ? join(process.env.GSD_PKG_ROOT, 'src/resources/extensions/gsd') : null,
+    '../gsd'
+  ].filter(Boolean) as string[];
 
-  const autoDispatch = await import(join(gsdCorePath, "auto-dispatch.js"));
-  const filesModule = await import(join(gsdCorePath, "files.js"));
-  const dbModule = await import(join(gsdCorePath, "gsd-db.js"));
-  const promptsModule = await import(join(gsdCorePath, "auto-prompts.js"));
-  const reactiveGraph = await import(join(gsdCorePath, "reactive-graph.js"));
-  const prefsModels = await import(join(gsdCorePath, "preferences-models.js"));
+  let gsdCorePath = "";
+  for (const p of possiblePaths) {
+    if (existsSync(join(p, "auto-dispatch.js")) || existsSync(join(p, "auto-dispatch.ts"))) {
+      gsdCorePath = p;
+      break;
+    }
+  }
+
+  if (!gsdCorePath) {
+    process.stderr.write("[Wave Optimizer] Error: Could not find GSD core extension directory.\n");
+    return;
+  }
+
+  const getModulePath = (name: string) => {
+    const jsPath = join(gsdCorePath, `${name}.js`);
+    const tsPath = join(gsdCorePath, `${name}.ts`);
+    return existsSync(jsPath) ? jsPath : tsPath;
+  };
+
+  const importModule = async (name: string) => {
+    const p = getModulePath(name);
+    return await import(pathToFileURL(p).href);
+  };
+
+  let autoDispatch, filesModule, dbModule, promptsModule, reactiveGraph, prefsModels;
+  try {
+    autoDispatch = await importModule("auto-dispatch");
+    filesModule = await importModule("files");
+    dbModule = await importModule("gsd-db");
+    promptsModule = await importModule("auto-prompts");
+    reactiveGraph = await importModule("reactive-graph");
+    prefsModels = await importModule("preferences-models");
+  } catch (err) {
+    process.stderr.write(`[Wave Optimizer] Error loading core modules: ${err instanceof Error ? err.message : String(err)}\n`);
+    return;
+  }
 
   const DISPATCH_RULES = autoDispatch.DISPATCH_RULES;
 
   // =====================================================================
   // 规则 1：波次优化强制关卡 (Wave Optimization Gate)
-  // 如果发现 Txx-PLAN.md 缺少 explicit `wave` 字段，拦截并强制重构。
+  // 无视 PREFERENCES.md，强行开启拦截！
   // =====================================================================
   const enforceWaveBreakdownRule = {
     name: "executing → enforce-wave-breakdown",
-    match: async ({ state, mid, basePath, prefs }: any) => {
+    match: async ({ state, mid, basePath }: any) => {
+      // 只要是 executing 阶段，不管用户配没配置 reactive，全盘接管！
       if (state.phase !== "executing" || !state.activeSlice) return null;
       
-      const reactiveConfig = prefs?.reactive_execution;
-      if (!reactiveConfig?.enabled) return null;
-
       const sid = state.activeSlice.id;
       const sTitle = state.activeSlice.title;
       const tasksDir = join(basePath, ".gsd", "milestones", mid, "slices", sid, "tasks");
@@ -40,7 +72,7 @@ export default async function registerExtension(pi: ExtensionAPI) {
         return null; 
       }
 
-      // 检查是否所有任务都分配了 wave
+      // 强行检查所有任务是否都分配了 wave
       let needsOptimization = false;
       for (const file of files) {
         const content = readFileSync(join(tasksDir, file), "utf-8");
@@ -90,22 +122,21 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan into un
 
   // =====================================================================
   // 规则 2：纯波次执行引擎 (Pure Wave-Based Engine)
-  // 只读取未完成任务中 wave 最小的一批，作为当前波次派发
+  // 无视 PREFERENCES.md，强行启动 8 线程并发！
   // =====================================================================
   const waveReactiveRule = {
-    name: "executing → reactive-execute (parallel dispatch)", // 保持名字一样以便替换
+    name: "executing → reactive-execute (parallel dispatch)",
     match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry }: any) => {
       if (state.phase !== "executing" || !state.activeTask || !state.activeSlice) return null;
 
-      const reactiveConfig = prefs?.reactive_execution;
-      if (!reactiveConfig?.enabled) return null;
-
       const sid = state.activeSlice.id;
       const sTitle = state.activeSlice.title;
-      const maxParallel = reactiveConfig.max_parallel ?? 2;
-      const subagentModel = reactiveConfig.subagent_model ?? prefsModels.resolveModelWithFallbacksForUnit("subagent")?.primary;
-
-      if (maxParallel <= 1) return null;
+      
+      // 🧨 暴力美学：强行写死 8 并发！完全不看用户配置！
+      const maxParallel = 8;
+      
+      // 仍然允许用户在 PREFERENCES 里指定 subagent_model 用便宜模型，如果没有就用默认的
+      const subagentModel = prefs?.reactive_execution?.subagent_model ?? prefsModels.resolveModelWithFallbacksForUnit("subagent")?.primary;
 
       const tasksDir = join(basePath, ".gsd", "milestones", mid, "slices", sid, "tasks");
       let files: string[] = [];
@@ -125,7 +156,7 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan into un
         const meta = fm ? filesModule.parseFrontmatterMap(fm) : {};
 
         let wave = Number(meta.wave);
-        if (isNaN(wave)) wave = 999; // 兜底容错
+        if (isNaN(wave)) wave = 999; 
 
         let done = false;
         if (dbModule.isDbAvailable()) {
@@ -144,25 +175,19 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan into un
 
       if (pendingTasks.length === 0) return null;
 
-      // 找到当前未完成任务中，wave 最小的波次
       const minWave = Math.min(...pendingTasks.map(t => t.wave));
 
-      // 筛选出属于当前波次的所有任务
       const currentWaveIds = pendingTasks
         .filter(t => t.wave === minWave)
         .map(t => t.id)
         .sort();
 
-      // 如果当前波次只有 1 个任务，回退为原生单线执行（节省资源）
       if (currentWaveIds.length <= 1) return null; 
 
-      // 受 max_parallel 限制，截取当前波次要派发的任务
-      // (没选中的任务依然在这个 wave 里，等这批跑完下一回合继续取这批)
       const selected = currentWaveIds.slice(0, maxParallel);
 
-      process.stderr.write(`\n[Wave Optimizer] ${mid}/${sid} Wave ${minWave} Ready: ${currentWaveIds.length} | Dispatching: ${selected.join(",")}\n`);
+      process.stderr.write(`\n[Wave Optimizer] ${mid}/${sid} Wave ${minWave} Ready: ${currentWaveIds.length} | Dispatching: ${selected.join(",")} (Forced 8 Parallel)\n`);
 
-      // 写入状态，伪造一个 graphSnapshot 喂给原生健康检查
       reactiveGraph.saveReactiveState(basePath, mid, sid, {
         sliceId: sid,
         completed: [...completed],
@@ -195,12 +220,11 @@ Do NOT start executing the actual code/tasks yet. Only redesign the plan into un
   const oldRuleIndex = DISPATCH_RULES.findIndex((r: any) => r.name === "executing → reactive-execute (parallel dispatch)");
   
   if (oldRuleIndex !== -1) {
-    // 替换原生的图计算派发器为纯波次派发器
     DISPATCH_RULES[oldRuleIndex] = waveReactiveRule;
-    // 在派发前插入拦截器，强迫 LLM 切分波次和均匀化任务
     DISPATCH_RULES.splice(oldRuleIndex, 0, enforceWaveBreakdownRule);
     
-    process.stderr.write("[Wave Optimizer] Loaded. Reactive engine replaced with uniform wave execution.\n");
+    // 启动日志
+    process.stderr.write("[Wave Optimizer] Loaded. Forced 8-thread Wave Parallelism ENABLED! Ignoring PREFERENCES.md.\n");
   } else {
     process.stderr.write("[Wave Optimizer] Failed to find target rule. GSD version mismatch?\n");
   }
