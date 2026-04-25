@@ -1,15 +1,36 @@
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import os from "node:os";
+
+async function resolveGsdModule(moduleName: string) {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  
+  // 1. Try relative sibling (dev mode)
+  let gsdPath = join(__dirname, "..", "gsd");
+  if (existsSync(join(gsdPath, moduleName))) {
+    return import(pathToFileURL(join(gsdPath, moduleName)).href);
+  }
+
+  // 2. Try GSD install path
+  gsdPath = join(os.homedir(), ".gsd", "agent", "extensions", "gsd");
+  if (existsSync(join(gsdPath, moduleName))) {
+    return import(pathToFileURL(join(gsdPath, moduleName)).href);
+  }
+
+  // 3. Last resort fallback
+  throw new Error(`Cannot find GSD module: ${moduleName}`);
+}
 
 export default async function registerExtension(pi: ExtensionAPI) {
   // 1. 动态加载 GSD 内部模块
-  const autoDispatch = await import("../gsd/auto-dispatch.js");
-  const filesModule = await import("../gsd/files.js");
-  const dbModule = await import("../gsd/gsd-db.js");
-  const promptsModule = await import("../gsd/auto-prompts.js");
-  const reactiveGraph = await import("../gsd/reactive-graph.js");
-  const prefsModels = await import("../gsd/preferences-models.js");
+  const autoDispatch = await resolveGsdModule("auto-dispatch.js");
+  const filesModule = await resolveGsdModule("files.js");
+  const dbModule = await resolveGsdModule("gsd-db.js");
+  const promptsModule = await resolveGsdModule("auto-prompts.js");
+  const reactiveGraph = await resolveGsdModule("reactive-graph.js");
+  const prefsModels = await resolveGsdModule("preferences-models.js");
 
   const DISPATCH_RULES = autoDispatch.DISPATCH_RULES;
 
