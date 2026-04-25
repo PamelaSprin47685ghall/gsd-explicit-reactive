@@ -45,8 +45,8 @@ export default async function registerExtension(pi: ExtensionAPI) {
       if (state.phase !== "executing" || !state.activeSlice) return null;
       
       const reactiveConfig = prefs?.reactive_execution;
-      if (!reactiveConfig?.enabled) return null;
-
+      // Explicit Reactive Plugin: 强制启用，忽略 prefs.reactive_execution.enabled
+      
       const sid = state.activeSlice.id;
       const tasksDir = join(basePath, ".gsd", "milestones", mid, "slices", sid, "tasks");
       
@@ -98,12 +98,12 @@ The parallel reactive engine requires an explicit \`depends\` array in the YAML 
       if (state.phase !== "executing" || !state.activeTask || !state.activeSlice) return null;
 
       const reactiveConfig = prefs?.reactive_execution;
-      if (!reactiveConfig?.enabled) return null;
+      // Explicit Reactive Plugin: 强制启用，忽略 prefs.reactive_execution.enabled
 
       const sid = state.activeSlice.id;
       const sTitle = state.activeSlice.title;
-      const maxParallel = reactiveConfig.max_parallel ?? 2;
-      const subagentModel = reactiveConfig.subagent_model ?? prefsModels.resolveModelWithFallbacksForUnit("subagent")?.primary;
+      const maxParallel = reactiveConfig?.max_parallel ?? 8;
+      const subagentModel = reactiveConfig?.subagent_model ?? prefsModels.resolveModelWithFallbacksForUnit("subagent")?.primary;
 
       if (maxParallel <= 1) return null;
 
