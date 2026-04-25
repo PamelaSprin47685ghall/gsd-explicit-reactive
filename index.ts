@@ -1,53 +1,33 @@
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 
 export default async function registerExtension(pi: ExtensionAPI) {
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-
-  // 1. 探测 GSD 核心扩展的安装路径
-  const possibleCoreDirs = [
-    join(__dirname, "..", "gsd"),                              // 同级 (gsd install 布局)
-    join(__dirname, "..", "..", "extensions", "gsd"),          // 相对 git 缓存
-    join(__dirname, "..", "..", "..", "extensions", "gsd"),       // 深度 git 缓存
-    join(process.env.HOME || "", ".gsd/agent/extensions/gsd")   // 绝对路径 (自动获取 HOME)
-  ];
-
-  let coreDir = "";
-  for (const dir of possibleCoreDirs) {
-    if (existsSync(join(dir, "auto-dispatch.js"))) {
-      coreDir = dir;
-      break;
-    }
-  }
-
-  if (!coreDir) {
-    process.stderr.write("[Explicit Reactive] ERROR: Could not find GSD core extension directory.\n");
-    return;
-  }
-
-  // 2. 动态导入核心模块 (使用绝对路径导入绕过相对路径解析问题)
-  const autoDispatch = await import(join(coreDir, "auto-dispatch.js"));
-  const filesModule = await import(join(coreDir, "files.js"));
-  const dbModule = await import(join(coreDir, "gsd-db.js"));
-  const promptsModule = await import(join(coreDir, "auto-prompts.js"));
-  const reactiveGraph = await import(join(coreDir, "reactive-graph.js"));
-  const prefsModels = await import(join(coreDir, "preferences-models.js"));
+  // 1. 动态加载 GSD 内部模块
+  const autoDispatch = await import("../gsd/auto-dispatch.js");
+  const filesModule = await import("../gsd/files.js");
+  const dbModule = await import("../gsd/gsd-db.js");
+  const promptsModule = await import("../gsd/auto-prompts.js");
+  const reactiveGraph = await import("../gsd/reactive-graph.js");
+  const prefsModels = await import("../gsd/preferences-models.js");
 
   const DISPATCH_RULES = autoDispatch.DISPATCH_RULES;
 
-  // 规则 1：前置阻断与依赖修复 (如果发现缺少 explicit depends, 打回让 LLM 修正)
-  const enforceDepsRule = {
+  // =====================================================================
+  // 规则 1：强制并发重构关卡 (Concurrency Breakdown Gate)
+  // 如果发现任何 Txx-PLAN.md 缺少 explicit `depends`，拒绝执行，
+  // 强制 LLM 重新思考并拆分成适合并行的细粒度任务。
+  // =====================================================================
+  const enforceBreakdownRule = {
     name: "executing → enforce-explicit-dependencies",
     match: async ({ state, mid, basePath, prefs }: any) => {
       if (state.phase !== "executing" || !state.activeSlice) return null;
       
       const reactiveConfig = prefs?.reactive_execution;
-      // Explicit Reactive Plugin: 强制启用，忽略 prefs.reactive_execution.enabled
-      
+      if (!reactiveConfig?.enabled) return null;
+
       const sid = state.activeSlice.id;
+      const sTitle = state.activeSlice.title;
       const tasksDir = join(basePath, ".gsd", "milestones", mid, "slices", sid, "tasks");
       
       let files: string[] = [];
@@ -57,53 +37,69 @@ export default async function registerExtension(pi: ExtensionAPI) {
         return null; 
       }
 
-      let needsFixing = false;
+      // 检查是否所有任务都有 depends 字段
+      let needsOptimization = false;
       for (const file of files) {
         const content = readFileSync(join(tasksDir, file), "utf-8");
         const [fm] = filesModule.splitFrontmatter(content);
         const meta = fm ? filesModule.parseFrontmatterMap(fm) : {};
         
         if (meta.depends === undefined) {
-          needsFixing = true;
+          needsOptimization = true;
           break;
         }
       }
 
-      if (!needsFixing) return null;
+      if (!needsOptimization) return null; // 已经优化过，放行给并发引擎
 
+      process.stderr.write(`\n[Explicit Reactive Plugin] Intercepted ${mid}/${sid}. Forcing fine-grained breakdown.\n`);
+
+      // 拦截并派发强制重构任务
       return {
         action: "dispatch",
         unitType: "custom-step",
-        unitId: `${mid}/${sid}/fix-dependencies`,
-        prompt: `## Concurrency Optimization Required
+        unitId: `${mid}/${sid}/optimize-concurrency`,
+        prompt: `## Parallel Task Breakdown Required (CRITICAL)
 
-Before executing slice \`${sid}\`, you must define explicit execution dependencies for its tasks.
-The parallel reactive engine requires an explicit \`depends\` array in the YAML frontmatter of EVERY \`Txx-PLAN.md\` file.
+You are about to execute slice \`${sid}: ${sTitle}\`. However, the current task plan was likely generated sequentially and is too coarse-grained for efficient parallel execution.
 
-**Instructions:**
-1. Review all task plans in \`${sid}\`.
-2. Determine strict execution order (e.g., T02 must wait for T01 to finish).
-3. Use the \`edit\` tool to add \`depends: [T01]\` (or \`depends: []\` if no prerequisites) to the YAML frontmatter of EVERY task plan.
-4. Do NOT over-constrain. If tasks can run in parallel, leave their dependencies empty or parallel.
+To leverage the system's parallel reactive engine, you MUST completely refactor the task plan for this slice.
 
-**CRITICAL:** Do NOT start executing the actual tasks. Just update the YAML frontmatters, summarize that you added the dependencies, and complete this turn.`,
+**Your Mission:**
+1. **Deconstruct:** Break down the current coarse tasks in \`${sid}-PLAN.md\` into much smaller, highly cohesive, and decoupled sub-tasks.
+2. **Maximize Concurrency:** Design the new tasks so that as many as possible can run simultaneously without file conflicts.
+3. **Rewrite Files:** Use the \`write\` or \`edit\` tools to thoroughly update \`${sid}-PLAN.md\` and recreate the \`tasks/Txx-PLAN.md\` files to reflect your new fine-grained architecture.
+4. **Explicit Dependencies:** Determine the strict execution order (e.g., T02 must wait for T01).
+5. **The Proof Marker:** For EVERY \`Txx-PLAN.md\` file, you MUST inject a \`depends\` array into its YAML frontmatter. This is the system's proof that the task has been optimized.
+   - Example format:
+     \`\`\`yaml
+     ---
+     depends: [T01, T02]
+     ---
+     \`\`\`
+   - If a task has no prerequisites and can run immediately, you MUST write \`depends: []\`.
+
+Do NOT start executing the actual code/tasks yet. Only redesign the plan, rewrite the markdown files, and complete your turn.`,
       };
     }
   };
 
-  // 规则 2：显式并发调度引擎 (只认 YAML Frontmatter)
+  // =====================================================================
+  // 规则 2：显式并发调度引擎 (Robust Explicit DAG Engine)
+  // 只认 YAML 里的 depends 构建执行图
+  // =====================================================================
   const robustReactiveRule = {
     name: "executing → explicit-reactive-execute",
     match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry }: any) => {
       if (state.phase !== "executing" || !state.activeTask || !state.activeSlice) return null;
 
       const reactiveConfig = prefs?.reactive_execution;
-      // Explicit Reactive Plugin: 强制启用，忽略 prefs.reactive_execution.enabled
+      if (!reactiveConfig?.enabled) return null;
 
       const sid = state.activeSlice.id;
       const sTitle = state.activeSlice.title;
-      const maxParallel = reactiveConfig?.max_parallel ?? 8;
-      const subagentModel = reactiveConfig?.subagent_model ?? prefsModels.resolveModelWithFallbacksForUnit("subagent")?.primary;
+      const maxParallel = reactiveConfig.max_parallel ?? 2;
+      const subagentModel = reactiveConfig.subagent_model ?? prefsModels.resolveModelWithFallbacksForUnit("subagent")?.primary;
 
       if (maxParallel <= 1) return null;
 
@@ -143,16 +139,16 @@ The parallel reactive engine requires an explicit \`depends\` array in the YAML 
         allTasks.push({ id: tid, depends, done });
       }
 
+      // 根据显式的 depends 计算可以立即并发执行的任务
       const readyIds = allTasks
         .filter(t => !t.done && t.depends.every(d => completed.has(d)))
         .map(t => t.id)
         .sort();
 
-      if (readyIds.length <= 1) return null;
+      if (readyIds.length <= 1) return null; 
 
       const selected = readyIds.slice(0, maxParallel);
-
-      process.stderr.write(`\n[explicit-reactive] ${mid}/${sid} ready:${readyIds.length} dispatching:${selected.join(",")}\n`);
+      process.stderr.write(`\n[Explicit Reactive Plugin] ${mid}/${sid} DAG Ready: ${readyIds.length} | Dispatching: ${selected.join(",")}\n`);
 
       reactiveGraph.saveReactiveState(basePath, mid, sid, {
         sliceId: sid,
@@ -175,11 +171,16 @@ The parallel reactive engine requires an explicit \`depends\` array in the YAML 
     }
   };
 
-  // 挂载补丁
+  // =====================================================================
+  // 挂载补丁 (Monkey-Patching)
+  // =====================================================================
   const oldRuleIndex = DISPATCH_RULES.findIndex((r: any) => r.name === "executing → reactive-execute (parallel dispatch)");
+  
   if (oldRuleIndex !== -1) {
     DISPATCH_RULES[oldRuleIndex] = robustReactiveRule;
-    DISPATCH_RULES.splice(oldRuleIndex, 0, enforceDepsRule);
-    process.stderr.write("[Explicit Reactive Plugin] Loaded. Native reactive engine hijacked.\n");
+    DISPATCH_RULES.splice(oldRuleIndex, 0, enforceBreakdownRule);
+    process.stderr.write("[Explicit Reactive Plugin] Loaded. Native reactive engine hijacked and breakdown gate added.\n");
+  } else {
+    process.stderr.write("[Explicit Reactive Plugin] Failed to find target rule. GSD version mismatch?\n");
   }
 }

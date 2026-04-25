@@ -1,8 +1,8 @@
 {
   "id": "explicit-reactive",
   "name": "Explicit Reactive Engine",
-  "version": "1.0.0",
-  "description": "Replaces the fragile file I/O graph with explicit YAML frontmatter dependencies for robust parallel task execution.",
+  "version": "1.0.1",
+  "description": "Intercepts execution to force fine-grained task breakdown and explicit DAG generation for robust parallel execution.",
   "tier": "community",
   "requires": {
     "platform": "any"

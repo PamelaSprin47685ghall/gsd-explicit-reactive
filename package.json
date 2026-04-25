@@ -1,7 +1,7 @@
 {
   "name": "gsd-explicit-reactive",
-  "version": "1.0.0",
-  "description": "Overrides GSD's reactive execution to use explicit YAML dependencies.",
+  "version": "1.0.1",
+  "description": "Forces fine-grained task breakdown and overrides GSD's reactive execution to use explicit YAML dependencies.",
   "type": "module",
   "gsd": {
     "extension": true
@@ -12,5 +12,6 @@
     ]
   },
   "peerDependencies": {
+    "@gsd/pi-coding-agent": "*"
   }
 }
