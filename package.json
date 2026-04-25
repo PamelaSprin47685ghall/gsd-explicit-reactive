@@ -15,8 +15,5 @@
       "./index.ts"
     ]
   },
-  "peerDependencies": {
-    "@gsd/pi-coding-agent": "*",
-    "@gsd/pi-tui": "*"
-  }
+  "peerDependencies": {}
 }
