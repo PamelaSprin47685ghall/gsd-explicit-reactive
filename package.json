@@ -10,8 +10,5 @@
     "extensions": [
       "index.ts"
     ]
-  },
-  "peerDependencies": {
-    "@gsd/pi-coding-agent": "*"
   }
 }
