@@ -1,0 +1,28 @@
+# Runtime artifacts
+.gsd/
+.gsd-id
+.mcp.json
+.bg-shell/
+
+# Dependencies
+node_modules/
+
+# Build & test outputs
+dist/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
