@@ -200,6 +200,8 @@ test("initial plan-slice dispatch appends explicit wave sidecar prompt to the st
   assert.equal(dispatch.unitId, "M001/S01");
   assert.match(dispatch.prompt, /BASE_PLAN_PROMPT:M001\/S01/, "prompt should retain the standard plan-slice prompt body");
   assert.match(dispatch.prompt, /Plugin overlay: explicit task waves/, "prompt should include the plugin sidecar overlay on first plan");
+  assert.match(dispatch.prompt, /fine-grained, uniformly sized tasks/, "prompt should force fine-grained uniform task sizing");
+  assert.match(dispatch.prompt, /Do not create one large implementation task/, "prompt should prohibit lopsided task decomposition");
   assert.match(dispatch.prompt, /\.gsd\/milestones\/M001\/slices\/S01\/S01-TASK-WAVES\.md/, "prompt should name the exact sidecar file");
   assert.match(dispatch.prompt, /Do not add `wave`, `waves`, `execution_wave`/, "prompt should prohibit non-native task frontmatter fields");
 });

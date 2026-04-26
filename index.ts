@@ -295,11 +295,13 @@ function buildWaveSidecarInitialPrompt(mid: string, sid: string): string {
     "Keep all normal GSD plan-slice requirements from the prompt above. In addition, record the parallel execution plan in a dedicated sidecar file instead of task frontmatter.",
     "",
     "Required behavior:",
-    "1. Plan the slice normally and call `gsd_plan_slice` with the task list. Keep task sizes roughly uniform (target about 30 minutes where practical).",
-    `2. After task plan files exist, create or replace exactly one wave sidecar file: \`${sidecarRelPath}\`.`,
-    "3. Do not add `wave`, `waves`, `execution_wave`, or any other plugin-only field to task-plan frontmatter. The sidecar is the only source of wave metadata.",
-    "4. Every `tasks/Txx-PLAN.md` in this slice must appear exactly once in the sidecar; do not include unknown task IDs.",
-    `5. Assign positive integer waves. Tasks in the same wave must be safe to execute concurrently; put dependent tasks, integration checks, and regression verification in later waves. Prefer useful parallelism up to ${FORCED_MAX_PARALLEL} tasks per wave, but choose correctness over concurrency.`,
+    "1. Plan the slice normally and call `gsd_plan_slice` with the task list.",
+    "2. Break the slice into fine-grained, uniformly sized tasks before calling `gsd_plan_slice`. Split any task that would dominate a wave into smaller observable tasks.",
+    "3. Keep task effort evenly distributed. Do not create one large implementation task plus several small cleanup or verification tasks; if a task cannot be made comparable in size, explain why in that task plan and place it in the appropriate later wave.",
+    `4. After task plan files exist, create or replace exactly one wave sidecar file: \`${sidecarRelPath}\`.`,
+    "5. Do not add `wave`, `waves`, `execution_wave`, or any other plugin-only field to task-plan frontmatter. The sidecar is the only source of wave metadata.",
+    "6. Every `tasks/Txx-PLAN.md` in this slice must appear exactly once in the sidecar; do not include unknown task IDs.",
+    `7. Assign positive integer waves. Tasks in the same wave must be safe to execute concurrently; put dependent tasks, integration checks, and regression verification in later waves. Prefer useful parallelism up to ${FORCED_MAX_PARALLEL} tasks per wave, but choose correctness over concurrency.`,
     "",
     "Use this exact sidecar shape:",
     "",
@@ -343,6 +345,7 @@ function buildWaveSidecarRepairPrompt(params: {
     "4. Use positive integer waves only. Tasks in the same wave must be safe for concurrent execution; place dependent, integration, and regression tasks in later waves.",
     "5. Do not add or modify wave metadata in any task-plan frontmatter. The sidecar is the sole wave source.",
     "6. If task dependencies are unclear, read the listed task plan files and choose conservative later waves rather than unsafe parallelism.",
+    "7. If you discover missing task plans while repairing, create only fine-grained, uniformly sized tasks; do not merge work into a coarse catch-all task.",
   ].join("\n");
 }
 
