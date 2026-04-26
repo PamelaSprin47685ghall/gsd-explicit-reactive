@@ -75,7 +75,8 @@ function sortTaskPlanFiles(files: string[]): string[] {
   });
 }
 
-const WAVE_SIDECAR_SUFFIX = "-TASK-WAVES.md";
+const WAVE_CONFIG_SUFFIX = "-TASK-WAVES.json";
+const LEGACY_WAVE_SIDECAR_SUFFIX = "-TASK-WAVES.md";
 
 type WaveParseFailure = {
   reason: string;
@@ -87,7 +88,7 @@ type WavePlanResult =
   | { ok: false; path: string; relPath: string; reason: string; detail?: string };
 
 function waveSidecarFileName(sid: string): string {
-  return `${sid}${WAVE_SIDECAR_SUFFIX}`;
+  return `${sid}${WAVE_CONFIG_SUFFIX}`;
 }
 
 function waveSidecarAbsPath(basePath: string, mid: string, sid: string): string {
@@ -98,71 +99,93 @@ function waveSidecarRelPath(mid: string, sid: string): string {
   return join(".gsd", "milestones", mid, "slices", sid, waveSidecarFileName(sid));
 }
 
-function parseWaveNumber(rawWave: string): { wave: number | null; reason: string | null } {
-  const normalized = rawWave.trim().replace(/^`|`$/g, "");
-  if (normalized === "") {
-    return { wave: null, reason: "wave-empty" };
-  }
-  if (!/^\d+$/.test(normalized)) {
+function isJsonRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseWaveNumber(rawWave: unknown): { wave: number | null; reason: string | null } {
+  if (typeof rawWave !== "number" || !Number.isInteger(rawWave)) {
     return { wave: null, reason: "wave-non-integer" };
   }
-
-  const numericWave = Number(normalized);
-  if (!Number.isSafeInteger(numericWave)) {
+  if (!Number.isSafeInteger(rawWave)) {
     return { wave: null, reason: "wave-unsafe-integer" };
   }
-  if (numericWave < 1) {
+  if (rawWave < 1) {
     return { wave: null, reason: "wave-out-of-range" };
   }
 
-  return { wave: numericWave, reason: null };
+  return { wave: rawWave, reason: null };
 }
 
-function normalizeTableCell(value: string): string {
-  return value.trim().replace(/^`|`$/g, "").trim();
-}
-
-function parseWaveSidecar(content: string): { waves: Map<string, number>; failures: WaveParseFailure[] } {
-  const waves = new Map<string, number>();
-  const failures: WaveParseFailure[] = [];
-
-  for (const rawLine of content.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line.startsWith("|") || !line.endsWith("|")) continue;
-
-    const cells = line
-      .slice(1, -1)
-      .split("|")
-      .map(normalizeTableCell);
-
-    if (cells.length < 2) continue;
-
-    const taskCell = cells[0];
-    const waveCell = cells[1];
-    if (/^task$/i.test(taskCell) && /^wave$/i.test(waveCell)) continue;
-    if (/^:?-{3,}:?$/.test(taskCell) || /^:?-{3,}:?$/.test(waveCell)) continue;
-
-    if (!/^[A-Za-z0-9_-]+$/.test(taskCell)) {
-      failures.push({ reason: "task-id-invalid", detail: taskCell });
-      continue;
-    }
-
-    const parsedWave = parseWaveNumber(waveCell);
-    if (parsedWave.wave === null) {
-      failures.push({ reason: parsedWave.reason ?? "wave-invalid", detail: `${taskCell}:${waveCell}` });
-      continue;
-    }
-
-    if (waves.has(taskCell)) {
-      failures.push({ reason: "task-duplicated", detail: taskCell });
-      continue;
-    }
-
-    waves.set(taskCell, parsedWave.wave);
+function parseTaskId(rawTaskId: unknown): { taskId: string | null; reason: string | null } {
+  if (typeof rawTaskId !== "string") {
+    return { taskId: null, reason: "task-id-missing" };
   }
 
-  if (waves.size === 0 && failures.length === 0) {
-    failures.push({ reason: "no-wave-table-rows" });
+  const taskId = rawTaskId.trim();
+  if (!/^[A-Za-z0-9_-]+$/.test(taskId)) {
+    return { taskId: null, reason: "task-id-invalid" };
+  }
+
+  return { taskId, reason: null };
+}
+
+function parseWaveSidecar(content: string, sid: string): { waves: Map<string, number>; failures: WaveParseFailure[] } {
+  const waves = new Map<string, number>();
+  const failures: WaveParseFailure[] = [];
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(content);
+  } catch (err) {
+    return { waves, failures: [{ reason: "json-invalid", detail: errMessage(err) }] };
+  }
+
+  if (!isJsonRecord(parsed)) {
+    return { waves, failures: [{ reason: "root-not-object" }] };
+  }
+
+  if (parsed.sliceId !== sid) {
+    return { waves, failures: [{ reason: "slice-id-mismatch", detail: String(parsed.sliceId) }] };
+  }
+
+  if (!Array.isArray(parsed.tasks)) {
+    return { waves, failures: [{ reason: "tasks-not-array" }] };
+  }
+
+  if (parsed.tasks.length === 0) {
+    return { waves, failures: [{ reason: "no-wave-tasks" }] };
+  }
+
+  for (const [index, rawTask] of parsed.tasks.entries()) {
+    if (!isJsonRecord(rawTask)) {
+      failures.push({ reason: "task-entry-not-object", detail: String(index) });
+      continue;
+    }
+
+    const parsedTaskId = parseTaskId(rawTask.taskId);
+    if (parsedTaskId.taskId === null) {
+      failures.push({ reason: parsedTaskId.reason ?? "task-id-invalid", detail: String(index) });
+      continue;
+    }
+
+    const parsedWave = parseWaveNumber(rawTask.wave);
+    if (parsedWave.wave === null) {
+      failures.push({ reason: parsedWave.reason ?? "wave-invalid", detail: `${parsedTaskId.taskId}:${String(rawTask.wave)}` });
+      continue;
+    }
+
+    if (rawTask.why !== undefined && typeof rawTask.why !== "string") {
+      failures.push({ reason: "why-not-string", detail: parsedTaskId.taskId });
+      continue;
+    }
+
+    if (waves.has(parsedTaskId.taskId)) {
+      failures.push({ reason: "task-duplicated", detail: parsedTaskId.taskId });
+      continue;
+    }
+
+    waves.set(parsedTaskId.taskId, parsedWave.wave);
   }
 
   return { waves, failures };
@@ -176,7 +199,9 @@ function loadWavePlan(basePath: string, mid: string, sid: string, taskIds: strin
 
   let sidecars: string[] = [];
   try {
-    sidecars = readdirSync(sliceDir).filter((file) => file.endsWith(WAVE_SIDECAR_SUFFIX));
+    sidecars = readdirSync(sliceDir).filter(
+      (file) => file.endsWith(WAVE_CONFIG_SUFFIX) || file.endsWith(LEGACY_WAVE_SIDECAR_SUFFIX),
+    );
   } catch (err) {
     return {
       ok: false,
@@ -214,7 +239,7 @@ function loadWavePlan(basePath: string, mid: string, sid: string, taskIds: strin
     };
   }
 
-  const parsed = parseWaveSidecar(content);
+  const parsed = parseWaveSidecar(content, sid);
   if (parsed.failures.length > 0) {
     return {
       ok: false,
@@ -292,27 +317,29 @@ function buildWaveSidecarInitialPrompt(mid: string, sid: string): string {
   return [
     "## Plugin overlay: explicit task waves for parallel execution",
     "",
-    "Keep all normal GSD plan-slice requirements from the prompt above. In addition, record the parallel execution plan in a dedicated sidecar file instead of task frontmatter.",
+    "Keep all normal GSD plan-slice requirements from the prompt above. In addition, record the parallel execution plan in a dedicated JSON sidecar file instead of task frontmatter.",
     "",
     "Required behavior:",
     "1. Plan the slice normally and call `gsd_plan_slice` with the task list.",
     "2. Break the slice into fine-grained, uniformly sized tasks before calling `gsd_plan_slice`. Split any task that would dominate a wave into smaller observable tasks.",
     "3. Keep task effort evenly distributed. Do not create one large implementation task plus several small cleanup or verification tasks; if a task cannot be made comparable in size, explain why in that task plan and place it in the appropriate later wave.",
-    `4. After task plan files exist, create or replace exactly one wave sidecar file: \`${sidecarRelPath}\`.`,
-    "5. Do not add `wave`, `waves`, `execution_wave`, or any other plugin-only field to task-plan frontmatter. The sidecar is the only source of wave metadata.",
+    `4. After task plan files exist, create or replace exactly one JSON wave sidecar file: \`${sidecarRelPath}\`.`,
+    "5. Do not add `wave`, `waves`, `execution_wave`, or any other plugin-only field to task-plan frontmatter. The JSON sidecar is the only source of wave metadata.",
     "6. Every `tasks/Txx-PLAN.md` in this slice must appear exactly once in the sidecar; do not include unknown task IDs.",
     `7. Assign positive integer waves. Tasks in the same wave must be safe to execute concurrently; put dependent tasks, integration checks, and regression verification in later waves. Prefer useful parallelism up to ${FORCED_MAX_PARALLEL} tasks per wave, but choose correctness over concurrency.`,
+    "8. Do not create Markdown wave sidecars. Remove any legacy `*-TASK-WAVES.md` file for this slice if one exists.",
     "",
-    "Use this exact sidecar shape:",
+    "Use this exact JSON shape:",
     "",
-    "```markdown",
-    `# ${sid} Task Waves`,
-    "",
-    "| Task | Wave | Why |",
-    "|---|---:|---|",
-    "| T01 | 1 | Independent setup or implementation work. |",
-    "| T02 | 1 | Independent of T01; can run in parallel. |",
-    "| T03 | 2 | Depends on wave 1 outputs or performs integration verification. |",
+    "```json",
+    "{",
+    `  \"sliceId\": \"${sid}\",`,
+    "  \"tasks\": [",
+    "    { \"taskId\": \"T01\", \"wave\": 1, \"why\": \"Independent setup or implementation work.\" },",
+    "    { \"taskId\": \"T02\", \"wave\": 1, \"why\": \"Independent of T01; can run in parallel.\" },",
+    "    { \"taskId\": \"T03\", \"wave\": 2, \"why\": \"Depends on wave 1 outputs or performs integration verification.\" }",
+    "  ]",
+    "}",
     "```",
   ].join("\n");
 }
@@ -329,7 +356,7 @@ function buildWaveSidecarRepairPrompt(params: {
   return [
     "# Repair explicit task waves sidecar",
     "",
-    "This is a fallback repair dispatch from the `gsd-explicit-reactive` plugin. Do not redo the full plan-slice prompt; repair only the wave sidecar unless you discover that the task plans themselves are missing.",
+    "This is a fallback repair dispatch from the `gsd-explicit-reactive` plugin. Do not redo the full plan-slice prompt; repair only the JSON wave sidecar unless you discover that the task plans themselves are missing.",
     "",
     `- Milestone: ${mid}`,
     `- Slice: ${sid} — ${sTitle}`,
@@ -339,11 +366,11 @@ function buildWaveSidecarRepairPrompt(params: {
     `- Current task plan files: ${taskIds.length > 0 ? taskIds.map((taskId) => `\`${taskId}-PLAN.md\``).join(", ") : "(none found)"}`,
     "",
     "Required repair:",
-    `1. Create or replace exactly one file at \`${wavePlan.relPath}\`. If another \`*${WAVE_SIDECAR_SUFFIX}\` file exists in this slice directory, remove it so the canonical file is the only sidecar.`,
-    "2. Use a Markdown table with columns `Task`, `Wave`, and `Why`.",
+    `1. Create or replace exactly one file at \`${wavePlan.relPath}\`. If another \`*${WAVE_CONFIG_SUFFIX}\` file or legacy \`*${LEGACY_WAVE_SIDECAR_SUFFIX}\` file exists in this slice directory, remove it so the canonical JSON file is the only sidecar.`,
+    "2. Use a JSON object with `sliceId` and `tasks` fields. `tasks` must be an array of objects shaped as `{ \"taskId\": \"T01\", \"wave\": 1, \"why\": \"...\" }`.",
     "3. Include every listed task exactly once and no unknown task IDs.",
     "4. Use positive integer waves only. Tasks in the same wave must be safe for concurrent execution; place dependent, integration, and regression tasks in later waves.",
-    "5. Do not add or modify wave metadata in any task-plan frontmatter. The sidecar is the sole wave source.",
+    "5. Do not add or modify wave metadata in any task-plan frontmatter. The JSON sidecar is the sole wave source.",
     "6. If task dependencies are unclear, read the listed task plan files and choose conservative later waves rather than unsafe parallelism.",
     "7. If you discover missing task plans while repairing, create only fine-grained, uniformly sized tasks; do not merge work into a coarse catch-all task.",
   ].join("\n");

@@ -113,10 +113,9 @@ function writeTaskPlan(tasksDir, taskId, body = "") {
 }
 
 function writeWaveSidecar(sliceDir, sid, entries) {
-  const rows = entries.map(({ task, wave, why }) => `| ${task} | ${wave} | ${why ?? ""} |`).join("\n");
   writeFileSync(
-    join(sliceDir, `${sid}-TASK-WAVES.md`),
-    `# ${sid} Task Waves\n\n| Task | Wave | Why |\n|---|---:|---|\n${rows}\n`,
+    join(sliceDir, `${sid}-TASK-WAVES.json`),
+    `${JSON.stringify({ sliceId: sid, tasks: entries.map(({ task, wave, why }) => ({ taskId: task, wave, why: why ?? "" })) }, null, 2)}\n`,
     "utf-8",
   );
 }
@@ -202,7 +201,8 @@ test("initial plan-slice dispatch appends explicit wave sidecar prompt to the st
   assert.match(dispatch.prompt, /Plugin overlay: explicit task waves/, "prompt should include the plugin sidecar overlay on first plan");
   assert.match(dispatch.prompt, /fine-grained, uniformly sized tasks/, "prompt should force fine-grained uniform task sizing");
   assert.match(dispatch.prompt, /Do not create one large implementation task/, "prompt should prohibit lopsided task decomposition");
-  assert.match(dispatch.prompt, /\.gsd\/milestones\/M001\/slices\/S01\/S01-TASK-WAVES\.md/, "prompt should name the exact sidecar file");
+  assert.match(dispatch.prompt, /\.gsd\/milestones\/M001\/slices\/S01\/S01-TASK-WAVES\.json/, "prompt should name the exact sidecar file");
+  assert.match(dispatch.prompt, /"tasks": \[/, "prompt should require JSON task wave config");
   assert.match(dispatch.prompt, /Do not add `wave`, `waves`, `execution_wave`/, "prompt should prohibit non-native task frontmatter fields");
 });
 
@@ -238,7 +238,7 @@ test("fallback wave rewrite dispatch sends only the sidecar repair prompt", asyn
   assert.equal(dispatch.unitId, "M001/S01");
   assert.match(dispatch.prompt, /^# Repair explicit task waves sidecar/, "fallback prompt should be the plugin repair prompt");
   assert.doesNotMatch(dispatch.prompt, /BASE_PLAN_PROMPT:M001\/S01/, "fallback prompt must not resend the standard plan-slice prompt");
-  assert.match(dispatch.prompt, /S01-TASK-WAVES\.md/, "repair prompt should name the canonical sidecar");
+  assert.match(dispatch.prompt, /S01-TASK-WAVES\.json/, "repair prompt should name the canonical sidecar");
   assert.match(dispatch.prompt, /`T01-PLAN\.md`/, "repair prompt should include the current task plan set");
   assert.match(dispatch.prompt, /Harden object-pool safety and deterministic optimization outputs\./, "repair prompt should carry parsed goal text");
 });
@@ -332,6 +332,29 @@ test("invalid/missing wave sidecar degrades safely: no dispatch, no state write,
   assert.match(messages, /reactive-dispatch wave-sidecar-invalid/, "diagnostics should expose invalid sidecar cause");
   assert.match(messages, /wave-sidecar-task-set-mismatch/, "diagnostics should expose task set mismatch reason");
   assert.match(messages, /reactive-dispatch state-cleared/, "diagnostics should expose state clear fallback");
+});
+
+test("malformed JSON wave sidecar degrades safely with a parse diagnostic", async () => {
+  const { rule, reactiveGraph, db, notifications } = await prepareRule();
+  db.__resetDb();
+  reactiveGraph.__resetReactive();
+
+  const basePath = mkdtempSync(join(tmpdir(), "explicit-reactive-repo-"));
+  const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
+  const tasksDir = join(sliceDir, "tasks");
+  mkdirSync(tasksDir, { recursive: true });
+
+  writeTaskPlan(tasksDir, "T01");
+  writeTaskPlan(tasksDir, "T02");
+  writeFileSync(join(sliceDir, "S01-TASK-WAVES.json"), "{ bad json\n", "utf-8");
+
+  const result = await runReactiveRule(rule, basePath);
+  assert.equal(result, null, "malformed JSON must not dispatch a reactive batch");
+  assert.equal(reactiveGraph.__getSaves().length, 0, "malformed JSON must not write reactive state");
+  assert.equal(reactiveGraph.__getClears().length, 1, "malformed JSON should clear stale reactive state");
+
+  const messages = notifications.map((entry) => entry.message).join("\n");
+  assert.match(messages, /json-invalid/, "diagnostics should expose malformed JSON");
 });
 
 test("when no pending sidecar wave tasks remain, reactive state is cleared instead of persisting stale batch data", async () => {
