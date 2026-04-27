@@ -22,11 +22,20 @@ test('gsd-explicit-reactive', async (t) => {
   
   const registerPlugin = (await import("./index.js")).default;
   
+  const notifications = [];
+  const mockCtx = { ui: { notify: (msg, type) => { notifications.push({ msg, type }); } } };
+  let sessionStartHandler;
+  
   const mockPi = { 
-    on: (event, handler) => { if (event === "session_start") handler({}, {}); },
+    on: (event, handler) => { if (event === "session_start") sessionStartHandler = handler; },
     registerCommand: () => {} 
   };
-  await registerPlugin(mockPi);
+  
+  // Call the sync default export
+  registerPlugin(mockPi);
+  
+  // Now trigger session_start (async, so await it)
+  await sessionStartHandler({}, mockCtx);
   
   const autoDispatch = await import(path.join(testDir, "auto-dispatch.js"));
   const rules = autoDispatch.DISPATCH_RULES;

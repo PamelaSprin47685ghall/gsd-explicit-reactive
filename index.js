@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 
 const PLUGIN_NAME = "gsd-explicit-reactive";
 let FORCED_MAX_PARALLEL = 8;
@@ -28,6 +29,8 @@ const TASK_COLLATOR = new Intl.Collator("en", { numeric: true, sensitivity: "bas
 async function loadGsdCoreModules(ctx) {
   const extensionDir = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [
+    // Resolve via @gsd/pi-coding-agent package — works regardless of install location
+    null,
     process.env.GSD_CODING_AGENT_DIR ? path.join(process.env.GSD_CODING_AGENT_DIR, "extensions", "gsd") : null,
     process.env.GSD_PKG_ROOT ? path.join(process.env.GSD_PKG_ROOT, "dist", "resources", "extensions", "gsd") : null,
     process.env.GSD_PKG_ROOT ? path.join(process.env.GSD_PKG_ROOT, "src", "resources", "extensions", "gsd") : null,
@@ -38,6 +41,14 @@ async function loadGsdCoreModules(ctx) {
     path.join(process.cwd(), "gsd-2", "dist", "resources", "extensions", "gsd"),
     path.join(process.cwd(), "gsd-2", "src", "resources", "extensions", "gsd"),
   ].filter(Boolean);
+
+  // Resolve @gsd/pi-coding-agent to find bundled extensions path
+  try {
+    const req = createRequire(import.meta.url);
+    const pkgPath = req.resolve("@gsd/pi-coding-agent/package.json");
+    const dir = path.join(path.dirname(pkgPath), "dist", "resources", "extensions", "gsd");
+    candidates.unshift(dir);
+  } catch {}
 
   for (const dir of candidates) {
     if (!fs.existsSync(dir)) continue;
@@ -56,7 +67,7 @@ async function loadGsdCoreModules(ctx) {
       return loaded;
     }
   }
-  ctx?.ui?.notify(`[dispatch] Fail-Loud - Cannot locate GSD core modules`, "error");
+  ctx?.ui?.notify(`[dispatch] Cannot locate GSD core modules. Searched:\n  ${candidates.join("\n  ")}`, "error");
   return null;
 }
 
@@ -100,19 +111,17 @@ function loadWaves(basePath, mid, sid, allTaskIds) {
   return { ok: true, waves };
 }
 
-export default async function registerExplicitReactiveDispatch(pi) {
-  let capturedCtx = null;
-  pi.on("session_start", (_, ctx) => { capturedCtx = ctx; });
-
-  const core = await loadGsdCoreModules(capturedCtx);
-  if (!core) return;
-  
+// ---------------------------------------------------------------------------
+// Patch logic extracted so it can be called lazily once ctx is available
+// ---------------------------------------------------------------------------
+function patchDispatchRules(core, pi, capturedCtx) {
   const DISPATCH_RULES = core["auto-dispatch"].DISPATCH_RULES;
-  const dbModule = core["gsd-db"];
-  const promptsModule = core["auto-prompts"];
-  const reactiveGraph = core["reactive-graph"];
-  const prefsModels = core["preferences-models"];
-  
+
+  if (!Array.isArray(DISPATCH_RULES)) {
+    capturedCtx?.ui?.notify?.("[dispatch] DISPATCH_RULES is not an array — cannot patch", "error");
+    return;
+  }
+
   const originalPlanRuleIdx = DISPATCH_RULES.findIndex(r => r.name === "planning → plan-slice");
   if (originalPlanRuleIdx !== -1) {
     const originalRule = DISPATCH_RULES[originalPlanRuleIdx];
@@ -134,6 +143,11 @@ export default async function registerExplicitReactiveDispatch(pi) {
   const reactiveRuleIndex = DISPATCH_RULES.findIndex(r => r.name.includes("reactive-execute (parallel dispatch)"));
   if (reactiveRuleIndex !== -1) {
     DISPATCH_RULES.splice(reactiveRuleIndex, 1);
+    
+    const dbModule = core["gsd-db"];
+    const promptsModule = core["auto-prompts"];
+    const reactiveGraph = core["reactive-graph"];
+    const prefsModels = core["preferences-models"];
     
     const enforceWaveBreakdownRule = {
       name: "executing → enforce-explicit-waves",
@@ -233,8 +247,44 @@ export default async function registerExplicitReactiveDispatch(pi) {
       }
     };
 
-    DISPATCH_RULES.splice(reactiveRuleIndex, 0, enforceWaveBreakdownRule, waveReactiveRule);
+    try {
+      DISPATCH_RULES.splice(reactiveRuleIndex, 0, enforceWaveBreakdownRule, waveReactiveRule);
+    } catch (err) {
+      capturedCtx?.ui?.notify?.(
+        `[dispatch] Failed to inject reactive dispatch rules: ${err.message}`, "error"
+      );
+    }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin default export — synchronous, lazy-init
+// ---------------------------------------------------------------------------
+export default function registerExplicitReactiveDispatch(pi) {
+  let capturedCtx = null;
+  let patched = false;
+
+  pi.on("session_start", async (_, ctx) => {
+    capturedCtx = ctx;
+    if (patched) return;
+    patched = true;
+
+    try {
+      const core = await loadGsdCoreModules(capturedCtx);
+      if (!core) {
+        capturedCtx?.ui?.notify?.(
+          "[dispatch] Cannot locate GSD core modules — explicit-reactive dispatch disabled. " +
+          "Ensure @gsd/pi-coding-agent is installed.", "error"
+        );
+        return;
+      }
+      patchDispatchRules(core, pi, capturedCtx);
+    } catch (err) {
+      capturedCtx?.ui?.notify?.(
+        `[dispatch] Unexpected error during initialization: ${err.message}`, "error"
+      );
+    }
+  });
 
   pi.registerCommand("wave-size", {
     description: "Set maximum parallel task wave size",

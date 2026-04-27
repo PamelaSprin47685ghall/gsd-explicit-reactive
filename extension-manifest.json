@@ -5,6 +5,6 @@
   "description": "Overrides parallel dispatch to use deterministic explicit WAVES.json instead of implicit file dependencies.",
   "tier": "community",
   "requires": {
-    "platform": "any"
+    "platform": ">=2.29.0"
   }
 }
