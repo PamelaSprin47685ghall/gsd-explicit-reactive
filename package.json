@@ -1,11 +1,11 @@
 {
   "name": "gsd-explicit-reactive",
-  "version": "2.0.0",
-  "description": "Minimalist explicit task waves plugin",
+  "version": "3.0.0",
+  "description": "Explicit parallel task waves via WAVES.json sidecar — zero-dependency GSD extension",
   "type": "module",
   "exports": "./index.js",
   "scripts": {
-    "test": "node --test index.test.mjs"
+    "test": "node --test test/*.test.mjs"
   },
   "gsd": {
     "extension": true

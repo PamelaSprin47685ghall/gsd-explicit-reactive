@@ -26,3 +26,20 @@ coverage/
 .idea/
 .DS_Store
 Thumbs.db
+
+# ── GSD baseline ──
+.gsd
+*.swp
+*.swo
+*~
+*.code-workspace
+.next/
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+vendor/
+.cache/
+tmp/
