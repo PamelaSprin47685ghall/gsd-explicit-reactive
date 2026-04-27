@@ -1,13 +1,10 @@
 {
-  "id": "wave-optimizer",
-  "name": "Wave-Based Concurrency Optimizer",
+  "id": "explicit-reactive",
+  "name": "Explicit Reactive",
   "version": "2.0.0",
-  "description": "Forces LLM to break down tasks into uniformly-sized waves for optimal Bulk Synchronous Parallel (BSP) execution.",
+  "description": "Overrides parallel dispatch to use deterministic explicit WAVES.json instead of implicit file dependencies.",
   "tier": "community",
   "requires": {
     "platform": "any"
-  },
-  "provides": {
-    "hooks": ["session_start"]
   }
 }

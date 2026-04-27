@@ -1,44 +1,85 @@
-# gsd-explicit-reactive：回归矩阵与验证口径
+# GSD Explicit Reactive (显式并行波次插件)
 
-本文件固化插件的最小可复现回归检查，用于后续切片复用。
+`gsd-explicit-reactive` 是为 GSD 开发的一款调度拦截插件，旨在将 GSD 核心原生那些“理想化但脆弱”的隐式文件依赖算法，重置为基于静态文件的**显式并行波次（Explicit Waves）**控制。它强制大模型通过集中的 JSON 配置文件去声明并发结构，彻底消灭了不可控的竞态条件和死锁。
 
-## 1) 设计语义不变（验收前提）
+通过极致的重构，整个插件仅以一个不到 200 行的原生 JavaScript 文件 (`index.js`) 构成，完全抛弃了复杂的 TypeScript 定义和厚重的模块加载器，直接将“显式并行的确定性”注入到 Auto-Mode 的血脉之中。
 
-以下语义必须保持不变，不属于可调整范围：
+## 核心特性：化“隐式盲猜”为“显式掌控”
 
-- 强制接管 `reactive-execute` dispatch 规则。
-- 强制触发 wave sidecar 兜底修复（`executing → enforce-wave-breakdown`）。
-- 固定并发上限 `FORCED_MAX_PARALLEL = 8`。
-- Task wave 不写入 task-plan frontmatter；每个 slice 恰好使用一个 JSON sidecar：`.gsd/milestones/<M>/slices/<S>/<S>-TASK-WAVES.json`。
-- 初次 `plan-slice` 派发同时包含 GSD 标准 plan prompt 和插件并发/sidecar prompt；兜底重试只发送插件 repair prompt。
-
-## 2) 最小回归矩阵
-
-> 所有场景都绑定统一诊断字段：`[dispatch] <phase> <cause> ...`。
-
-| 场景 | 回归目的 | 执行命令 | 关键日志关键字（示例） | 通过标准 |
-|---|---|---|---|---|
-| 初次计划提示词 | 确认标准 plan prompt 与插件 sidecar prompt 一起发出 | `node --test --test-name-pattern "initial plan-slice" tests/reactive-dispatch.test.mjs` | `Plugin overlay: explicit task waves` | prompt 保留标准 `buildPlanSlicePrompt` 内容，并要求创建唯一 `Sxx-TASK-WAVES.json`；明确禁止 `wave` frontmatter |
-| 兜底修复提示词 | 确认 sidecar 缺失/异常时只发送插件 repair prompt | `node --test --test-name-pattern "fallback wave rewrite" tests/reactive-dispatch.test.mjs` | `# Repair explicit task waves sidecar` | 不重发标准 plan prompt；repair prompt 含当前 task set、canonical sidecar path、slice goal |
-| 主线（deterministic dispatch） | 确认当前 wave 从 sidecar 读取，任务选择/排序/截断稳定，且状态落盘语义一致 | `node --test --test-name-pattern "reads waves from the single sidecar" tests/reactive-dispatch.test.mjs` | `reactive-dispatch batch-selected`<br>`reactive-dispatch state-written` | 产生 `reactive-execute` 派发；`unitId` 与 `dispatched` 顺序稳定；`graphSnapshot` 计数一致 |
-| 模块加载失败（fail-loud） | 确认内部模块导入失败时不会静默吞错，且挂载被安全中止 | `node --test --test-name-pattern "module import failure remains fail-loud" tests/reactive-dispatch.test.mjs` | `module-load core-modules-import-failed` | 出现 fail-loud 诊断；不会出现 `patch-mount mounted` |
-| 空批次（无 pending sidecar wave 任务） | 确认不再保留陈旧 reactive state，顺序降级前先清理状态 | `node --test --test-name-pattern "no pending sidecar wave tasks remain" tests/reactive-dispatch.test.mjs` | `reactive-dispatch state-cleared`<br>`reason=no-pending-wave-tasks` | 不派发 reactive 批次、不写新状态、清理旧状态 |
-| 异常 sidecar | 确认缺失/异常 sidecar 时安全降级，避免误派发与状态污染 | `node --test --test-name-pattern "invalid/missing wave sidecar" tests/reactive-dispatch.test.mjs` | `reactive-dispatch wave-sidecar-invalid`<br>`wave-sidecar-task-set-mismatch` | 不派发 reactive 批次、不写新状态、清理旧状态，并输出可定位原因 |
-| JSON 解析失败 | 确认 malformed JSON 不会被容错误读或误派发 | `node --test --test-name-pattern "malformed JSON wave sidecar" tests/reactive-dispatch.test.mjs` | `json-invalid`<br>`reactive-dispatch state-cleared` | 不派发 reactive 批次、不写新状态、清理旧状态，并输出 JSON 解析失败原因 |
-
-## 3) 可重复执行步骤（推荐）
-
-运行完整回归集：
-
-```bash
-node --test tests/reactive-dispatch.test.mjs
+### 1. 强制静态波次配置 (Centralized JSON Sidecar)
+在原生的 GSD 中，系统试图通过扫描所有任务的文件读写记录动态拼凑出无冲突的任务依赖图，稍有不慎即全盘崩溃。
+本插件拦截了初始计划流程，强制要求大模型**不准**把 `wave` 参数写在任务文档里，而是必须在切片目录下生成唯一的 `.gsd/milestones/<M>/slices/<S>/WAVES.json`，集中调度并发波次：
+```json
+{
+  "T01": 1,
+  "T02": 1,
+  "T03": 2
+}
 ```
 
-## 4) 统一验收口径
+### 2. 硬核并发截流 (Forced Max Parallelism)
+不管大模型在某个波次安排了多少个任务，插件在重写的派发算法里强制设下了**最高 8 并发 (`FORCED_MAX_PARALLEL = 8`)**的不可逾越红线。超出的任务会遵循自然数字排序（A-Z, 0-9）被截断到后续批次执行，保护机器性能和 API 速率配额不被击穿。
 
-当且仅当以下条件同时满足时，可认为相关变更验收通过：
+### 3. “绝不将就”的自动修复环 (Strict Repair Loop)
+如果 JSON 文件缺失、格式错误或者大模型规划的任务列表跟配置文件对不上号：
+- 系统**绝对不会**允许静默降级为串行执行，因为这会掩盖大模型的错误。
+- 插件会立刻阻断接下来的执行，替换常规指令为一则严厉的“修复提示词 (Repair Prompt)”，强制要求 LLM 停下手中的活先将 `WAVES.json` 修复好。
+- 当处于该修复分支时，底层的残余 Reactive 状态会被强制清洗，保证环境卫生。
 
-- **语义保持**：forced dispatch takeover / wave sidecar fallback / fixed parallel=8 均未被弱化或门控。
-- **实现正确性**：同输入可复现同批次；边界路径（模块失败、空批次、异常 sidecar）行为一致。
-- **可诊断性**：关键路径日志统一带 `phase/cause`，能够直接定位失败阶段与原因。
-- **状态卫生**：顺序降级分支不会遗留陈旧 reactive state，避免污染后续恢复与诊断。
+## 用户命令 (Commands)
+
+插件提供了一条直观的控制命令：
+
+```bash
+/wave-size 5
+```
+
+这可以将最大并发数量 (`FORCED_MAX_PARALLEL`) 动态变更为 `5`。你所设置的阈值将自动持久化保存到 `~/.gsd/explicit-reactive.json`，因此只需设置一次，所有新开的终端和代理运行都会共享这一防并发击穿的上限配置。
+
+## 安装
+
+这是为 `pi-coding-agent` (GSD) 开发的非官方社区插件。进入 GSD 配置的插件目录中：
+
+```bash
+git clone https://github.com/your-username/gsd-explicit-reactive.git
+```
+
+确保 `package.json` 包含如下挂载项：
+
+```json
+{
+  "gsd": {
+    "extension": true
+  },
+  "pi": {
+    "extensions": ["index.js"]
+  }
+}
+```
+
+在下次运行 `/gsd auto` 时，本插件会自动拦截 `auto-dispatch` 内部队列并完成替换。
+
+## 架构：少即是多
+
+相较于早先包含庞杂模块发现机制与文件遍历工具的版本，目前的 `index.js` 单文件完美利用了 JavaScript 动态加载的强大优势。不仅直接打进 `DISPATCH_RULES` 的内部数组并保证顺序正确（在原有串行 `execute-task` 之前抢先起飞），还使用了纯净原生的数组过滤机制。再也没有繁重的依赖编译，只有绝对确定的并行。
+
+## 运行测试
+
+只需安装 Node.js (>=20) ，即可运行零外部依赖的内建断言测试：
+
+```bash
+npm run test
+# 或者: node --test index.test.mjs
+```
+
+```text
+▶ gsd-explicit-reactive
+  ✔ injects WAVES.json prompt into plan-slice (0.51ms)
+  ✔ replaces reactive-execute with explicit rules (0.11ms)
+  ✔ enforce-explicit-waves returns repair prompt if WAVES.json missing (0.31ms)
+✔ gsd-explicit-reactive (11.31ms)
+```
+
+## 证书
+
+MIT License

@@ -1,19 +1,16 @@
 {
-  "name": "gsd-wave-optimizer",
+  "name": "gsd-explicit-reactive",
   "version": "2.0.0",
-  "description": "Embraces GSD's Bulk Synchronous Parallel engine by forcing uniform task sizing and explicit wave-based execution batches.",
+  "description": "Minimalist explicit task waves plugin",
   "type": "module",
-  "keywords": [
-    "pi-package",
-    "gsd-extension"
-  ],
+  "exports": "./index.js",
+  "scripts": {
+    "test": "node --test index.test.mjs"
+  },
   "gsd": {
     "extension": true
   },
   "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
-  "peerDependencies": {}
+    "extensions": ["index.js"]
+  }
 }
