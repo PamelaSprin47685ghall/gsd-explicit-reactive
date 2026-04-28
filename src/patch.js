@@ -5,12 +5,41 @@ function buildPlanSlicePatcher(waveSize) {
   return function patchPlanSlice(args) {
     const { mid, state } = args;
     const sid = state.activeSlice.id;
-    args.prompt += `\n\n## Task Waves\n\nCreate \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`:\n\`\`\`json\n{\n  "T01": 1,\n  "T02": 1,\n  "T03": 2\n}\n\`\`\`\nWave number is a positive integer. Same-wave tasks run concurrently (max ${waveSize}).`;
+    args.prompt += `
+
+## Fine-Grained Parallelism (WAVES.json)
+
+This slice uses **wave-based parallel execution**. Tasks in the same wave run simultaneously in isolated subagent contexts. Tasks in different waves run sequentially.
+
+### Why This Matters
+
+Previous slices were slow because tasks had implicit sequential coupling — task B couldn't start until task A finished, even when they were doing unrelated work. **Every task that can run in parallel should run in parallel.** Design tasks as fine-grained, orthogonal units.
+
+### How to Design for Parallelism
+
+- Decompose work into the smallest independently-useful units. A task should do one thing and do it well.
+- If two tasks don't directly depend on each other's output, they belong in the same wave.
+- If task B depends on task A's output, they must be in different waves (A in wave 1, B in wave 2).
+- **Single-task waves are fine** — don't force parallelism where sequential ordering is genuinely required.
+
+### WAVES.json
+
+Create \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\` with each task mapped to a positive-integer wave number (1 = first wave, 2 = second, etc.):
+
+\`\`\`json
+{
+  "T01": 1,
+  "T02": 1,
+  "T03": 2
+}
+\`\`\`
+
+Max concurrent tasks per wave: **${waveSize}**. If a wave has more tasks than this limit, split into multiple waves — put first \`${waveSize}\` tasks in wave N, the rest in wave N+1 (reorder by dependency if needed).`;
     return args;
   };
 }
 
-function buildEnforceWaveRule(capturedCtx, reactiveGraph) {
+function buildEnforceWaveRule(waveSize, capturedCtx, reactiveGraph) {
   return {
     name: "executing → enforce-explicit-waves",
     match: async ({ state, mid, basePath }) => {
@@ -29,7 +58,21 @@ function buildEnforceWaveRule(capturedCtx, reactiveGraph) {
         action: "dispatch",
         unitType: "plan-slice",
         unitId: `${mid}/${sid}`,
-        prompt: `# Fix WAVES.json\n\nReason: ${wavePlan.reason}\n\nFix \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`. Example:\n\`\`\`json\n{\n  "T01": 1,\n  "T02": 1,\n  "T03": 2\n}\n\`\`\``
+        prompt: `# Restructure Slice: Broken WAVES.json
+
+**Root issue:** ${wavePlan.reason}
+
+This slice needs a full restructuring. You have complete freedom to redesign the task plan:
+
+- Add new tasks if the current breakdown is too coarse
+- Remove tasks that don't make sense
+- Split a large task into two smaller parallel tasks
+- Merge tasks that are too granular
+- Renumber waves as needed
+
+The goal: a set of fine-grained, orthogonal tasks with a valid WAVES.json where same-wave tasks run concurrently and don't depend on each other's output.
+
+Call \`gsd_plan_slice\` with your restructured plan.`
       };
     }
   };

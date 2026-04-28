@@ -40,7 +40,7 @@ test("patch", async (t) => {
     const planRule = rules.find(r => r.name === "planning → plan-slice");
     const result = await planRule.match({ mid: "M01", state: { activeSlice: { id: "S01" } } });
     assert.ok(result.prompt.includes("WAVES.json"), "should inject WAVES.json requirement");
-    assert.ok(result.prompt.includes("max"), "should mention concurrency limit");
+    assert.ok(result.prompt.includes("Max"), "should mention concurrency limit");
   });
 
   await t.test("replaces reactive-execute with enforce + reactive rules", async () => {
