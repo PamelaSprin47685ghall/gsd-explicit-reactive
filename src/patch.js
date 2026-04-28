@@ -119,8 +119,8 @@ export function patchDispatchRules(core, pi, capturedCtx) {
     return;
   }
 
-  const waveSize = loadWaveSize();
-  const planSlicePatcher = buildPlanSlicePatcher(waveSize);
+  const waveSize = loadWaveSize(capturedCtx);
+  const planSlicePatcher = buildPlanSlicePatcher(waveSize, capturedCtx);
   const reactiveGraph = core["reactive-graph"];
   const dbModule = core["gsd-db"];
   const promptsModule = core["auto-prompts"];

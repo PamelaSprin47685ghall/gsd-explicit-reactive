@@ -19,7 +19,6 @@ async function tryImport(dir) {
 }
 
 export async function loadGsdCoreModules(ctx) {
-  const extensionDir = path.dirname(fileURLToPath(import.meta.url));
   const candidates = [];
 
   try {
@@ -28,21 +27,15 @@ export async function loadGsdCoreModules(ctx) {
     candidates.push(path.join(path.dirname(pkgPath), "dist", "resources", "extensions", "gsd"));
   } catch {}
 
-  if (process.env.GSD_CODING_AGENT_DIR)
-    candidates.push(path.join(process.env.GSD_CODING_AGENT_DIR, "extensions", "gsd"));
+  if (process.env.GSD_CODING_AGENT_DIR) {
+    candidates.push(path.join(process.env.GSD_CODING_AGENT_DIR, "dist", "resources", "extensions", "gsd"));
+    candidates.push(path.join(process.env.GSD_CODING_AGENT_DIR, "src", "resources", "extensions", "gsd"));
+  }
+
   if (process.env.GSD_PKG_ROOT) {
     candidates.push(path.join(process.env.GSD_PKG_ROOT, "dist", "resources", "extensions", "gsd"));
     candidates.push(path.join(process.env.GSD_PKG_ROOT, "src", "resources", "extensions", "gsd"));
   }
-
-  candidates.push(
-    path.join(extensionDir, "..", "gsd", "dist", "resources", "extensions", "gsd"),
-    path.join(extensionDir, "..", "gsd", "src", "resources", "extensions", "gsd"),
-    path.join(extensionDir, "..", "gsd-2", "dist", "resources", "extensions", "gsd"),
-    path.join(extensionDir, "..", "gsd-2", "src", "resources", "extensions", "gsd"),
-    path.join(process.cwd(), "gsd-2", "dist", "resources", "extensions", "gsd"),
-    path.join(process.cwd(), "gsd-2", "src", "resources", "extensions", "gsd"),
-  );
 
   for (const dir of candidates) {
     const mod = await tryImport(dir);

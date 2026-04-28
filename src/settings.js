@@ -7,15 +7,22 @@ function settingsPath() {
 
 const DEFAULT_WAVE_SIZE = 8;
 
-export function loadWaveSize() {
+export function loadWaveSize(ctx) {
   try {
-    const data = JSON.parse(readFile(settingsPath()) || "{}");
+    const data = JSON.parse(readFile(settingsPath(), ctx) || "{}");
     return typeof data.waveSize === "number" ? data.waveSize : DEFAULT_WAVE_SIZE;
-  } catch {
+  } catch (err) {
+    ctx?.ui?.notify(`Failed to load wave-size: ${err.message}`, "warning");
     return DEFAULT_WAVE_SIZE;
   }
 }
 
-export function saveWaveSize(size) {
-  writeFile(settingsPath(), JSON.stringify({ waveSize: size }));
+export function saveWaveSize(size, ctx) {
+  try {
+    writeFile(settingsPath(), JSON.stringify({ waveSize: size }), ctx);
+    return true;
+  } catch (err) {
+    ctx?.ui?.notify(`Failed to save wave-size: ${err.message}`, "error");
+    return false;
+  }
 }

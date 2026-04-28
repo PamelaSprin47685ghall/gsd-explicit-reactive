@@ -4,7 +4,7 @@ import path from "node:path";
 import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 
 async function createMockCore(dir) {
-  const gsdDir = path.join(dir, "extensions", "gsd");
+  const gsdDir = path.join(dir, "dist", "resources", "extensions", "gsd");
   mkdirSync(gsdDir, { recursive: true });
 
   writeFileSync(path.join(gsdDir, "auto-dispatch.js"), `

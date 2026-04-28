@@ -31,13 +31,15 @@ export default function explicitReactivePlugin(pi) {
       if (args.length > 0) {
         const size = parseInt(args[0], 10);
         if (!isNaN(size) && size > 0) {
-          saveWaveSize(size);
-          ctx.ui?.notify(`wave-size: ${size}`, "info");
+          const success = saveWaveSize(size, ctx);
+          if (success) {
+            ctx.ui?.notify(`wave-size: ${size}`, "info");
+          }
         } else {
           ctx.ui?.notify(`wave-size: invalid ${args[0]}`, "error");
         }
       } else {
-        ctx.ui?.notify(`wave-size: ${loadWaveSize()}. Usage: /wave-size <number>`, "info");
+        ctx.ui?.notify(`wave-size: ${loadWaveSize(ctx)}. Usage: /wave-size <number>`, "info");
       }
     }
   });
