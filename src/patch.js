@@ -21,6 +21,7 @@ Previous slices were slow because tasks had implicit sequential coupling — tas
 - If two tasks don't directly depend on each other's output, they belong in the same wave.
 - If task B depends on task A's output, they must be in different waves (A in wave 1, B in wave 2).
 - **Single-task waves are fine** — don't force parallelism where sequential ordering is genuinely required.
+- The wave number expresses ordering: wave 1 runs first, wave 2 second, etc. Higher-numbered waves see output from lower-numbered ones.
 
 ### WAVES.json
 
@@ -34,7 +35,11 @@ Create \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\` with each task mapped
 }
 \`\`\`
 
-Max concurrent tasks per wave: **${waveSize}**. If a wave has more tasks than this limit, split into multiple waves — put first \`${waveSize}\` tasks in wave N, the rest in wave N+1 (reorder by dependency if needed).`;
+Max concurrent tasks per wave: **${waveSize}**. If a wave has more tasks than this limit, split into multiple waves — put first \`${waveSize}\` tasks in wave N, the rest in wave N+1 (reorder by dependency if needed).
+
+### Wave-Aware Execution
+
+Every task executes with full wave context: it knows which wave it belongs to, what was completed before, and what comes after. This allows each task to focus on its own work without repeating what prior waves already did.`;
     return args;
   };
 }
@@ -121,15 +126,14 @@ function buildWaveReactiveRule(waveSize, capturedCtx, dbModule, promptsModule, r
       pending.sort((a, b) => a.wave - b.wave || TASK_COLLATOR.compare(a.id, b.id));
       const minWave = pending[0].wave;
       const currentWaveIds = pending.filter(t => t.wave === minWave).map(t => t.id);
-
-      if (currentWaveIds.length <= 1) {
-        if (reactiveGraph?.clearReactiveState)
-          reactiveGraph.clearReactiveState(basePath, mid, sid);
-        return null;
-      }
-
       const selected = currentWaveIds.slice(0, waveSize);
-      capturedCtx?.ui?.notify(`Wave ${minWave}: ${selected.length} tasks (max ${waveSize})`, "info");
+
+      // Compute full wave structure for context injection
+      const waveNumbers = [...new Set(allTaskIds.map(id => wavePlan.waves[id]))].sort((a, b) => a - b);
+      const totalWaves = waveNumbers.length;
+      const futureTasks = pending.filter(t => t.wave > minWave).map(t => `${t.id} (wave ${t.wave})`);
+
+      capturedCtx?.ui?.notify(`Wave ${minWave}/${totalWaves}: ${selected.length} task(s) (max ${waveSize})`, "info");
 
       const unitId = `${mid}/${sid}/reactive+${selected.join(",")}`;
 
@@ -138,18 +142,37 @@ function buildWaveReactiveRule(waveSize, capturedCtx, dbModule, promptsModule, r
           sliceId: sid,
           completed: Array.from(completed),
           dispatched: selected,
+          currentWave: minWave,
           graphSnapshot: { taskCount: allTaskIds.length, edgeCount: 0, readySetSize: currentWaveIds.length, ambiguous: false },
           updatedAt: new Date().toISOString()
         });
+
+      const basePrompt = await promptsModule.buildReactiveExecutePrompt(
+        mid, midTitle, sid, sTitle, selected, basePath, subagentModel,
+        { sessionContextWindow, modelRegistry }
+      );
+
+      const waveContextBlock = `
+
+## Wave Execution Context
+
+This is **wave ${minWave} of ${totalWaves}** in a structured wave execution plan. Tasks in the same wave are designed to run concurrently — they do not depend on each other's output.
+
+- **Completed (previous waves):** ${Array.from(completed).join(", ") || "(none)"}
+- **Now executing (wave ${minWave}):** ${selected.join(", ")}
+- **Upcoming (future waves):** ${futureTasks.join(", ") || "(none)"}
+
+### Rules
+- Do not re-do work from completed tasks — their output is already available.
+- Focus exclusively on the tasks listed above for this wave.
+- If a task in this wave has already been completed by a prior dispatch, skip it and report it as already done.
+- The wave plan is authoritative for execution ordering — all parallelism decisions were made at plan time.`;
 
       return {
         action: "dispatch",
         unitType: "reactive-execute",
         unitId,
-        prompt: await promptsModule.buildReactiveExecutePrompt(
-          mid, midTitle, sid, sTitle, selected, basePath, subagentModel,
-          { sessionContextWindow, modelRegistry }
-        )
+        prompt: basePrompt + waveContextBlock
       };
     }
   };
@@ -188,7 +211,7 @@ export function patchDispatchRules(core, pi, capturedCtx) {
   );
   if (reactiveRuleIdx !== -1) {
     DISPATCH_RULES.splice(reactiveRuleIdx, 1,
-      buildEnforceWaveRule(capturedCtx, reactiveGraph),
+      buildEnforceWaveRule(waveSize, capturedCtx, reactiveGraph),
       buildWaveReactiveRule(waveSize, capturedCtx, dbModule, promptsModule, reactiveGraph, prefsModels)
     );
   }
