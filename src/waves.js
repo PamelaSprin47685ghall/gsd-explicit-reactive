@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { uiLog } from "./logger.js";
 
 const TASK_COLLATOR = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
@@ -18,9 +19,10 @@ export function getTaskIds(basePath, mid, sid, dbModule) {
     .sort(TASK_COLLATOR.compare);
 }
 
-export function loadWaves(basePath, mid, sid, allTaskIds) {
+export function loadWaves(ctx, basePath, mid, sid, allTaskIds) {
   const waveFile = path.join(basePath, ".gsd", "milestones", mid, "slices", sid, "WAVES.json");
   if (!fs.existsSync(waveFile)) {
+    uiLog(ctx, `WAVES.json 丢失! 路径: ${waveFile}`, "error");
     return { ok: false, reason: "WAVES.json is missing. You MUST generate it." };
   }
 
@@ -30,6 +32,7 @@ export function loadWaves(basePath, mid, sid, allTaskIds) {
     raw = raw.replace(/^```[a-zA-Z]*\n?/i, "").replace(/```$/i, "").trim();
     waves = JSON.parse(raw);
   } catch (e) {
+    uiLog(ctx, "WAVES.json 解析失败，存在语法错误或包含 Markdown 标记。", "error");
     return { ok: false, reason: "WAVES.json contains malformed JSON or markdown artifacts." };
   }
 
@@ -50,10 +53,12 @@ export function loadWaves(basePath, mid, sid, allTaskIds) {
 
   if (missing.length > 0 || unknown.length > 0) {
     const detail = [];
-    if (missing.length > 0) detail.push(`Missing tasks: ${missing.join(", ")}`);
-    if (unknown.length > 0) detail.push(`Unknown/Invalid tasks: ${unknown.join(", ")}`);
-    return { ok: false, reason: `Task mismatch between PLAN.md and WAVES.json. ${detail.join("; ")}` };
+    if (missing.length > 0) detail.push(`Missing: ${missing.join(", ")}`);
+    if (unknown.length > 0) detail.push(`Unknown: ${unknown.join(", ")}`);
+    uiLog(ctx, `任务数量不匹配! ${detail.join("; ")}`, "error");
+    return { ok: false, reason: `Task mismatch between PLAN and WAVES.json. ${detail.join("; ")}` };
   }
 
+  uiLog(ctx, "WAVES.json 校验通过", "success");
   return { ok: true, waves: normalizedWaves };
 }

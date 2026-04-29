@@ -2,29 +2,22 @@ import { loadGsdCoreModules } from "./src/discovery.js";
 import { patchDispatchRules } from "./src/patch.js";
 import { loadWaveSize, saveWaveSize } from "./src/settings.js";
 import { getTaskIds, loadWaves } from "./src/waves.js";
-import { renderWaveDashboard } from "./src/ui.js";
+import { uiLog } from "./src/logger.js";
 
 let patched = false;
 
 export default async function explicitReactivePlugin(pi) {
-  try {
-    const core = await loadGsdCoreModules(null);
-    if (core && !patched) {
-      patched = true;
-      patchDispatchRules(core, pi);
-    }
-  } catch {}
-
   pi.on("session_start", async (_event, captureCtx) => {
+    uiLog(captureCtx, "检测到 Session 启动，正在初始化 Explicit Waves 并发引擎...", "info");
     if (patched) return;
     try {
       const core = await loadGsdCoreModules(captureCtx);
       if (core) {
         patched = true;
-        patchDispatchRules(core, pi);
+        patchDispatchRules(core, captureCtx);
       }
     } catch (err) {
-      captureCtx?.ui?.notify?.(`Init failed: ${err.message}`, "error");
+      uiLog(captureCtx, `初始化失败: ${err.message}`, "error");
     }
   });
 
@@ -35,13 +28,13 @@ export default async function explicitReactivePlugin(pi) {
         const size = parseInt(args[0], 10);
         if (!isNaN(size) && size > 0) {
           if (saveWaveSize(size, cmdCtx)) {
-            cmdCtx.ui?.notify(`✅ Wave capacity set to: ${size}`, "success");
+            uiLog(cmdCtx, `✅ 并发上限已设置为: ${size}`, "success");
           }
         } else {
-          cmdCtx.ui?.notify(`Invalid number: ${args[0]}`, "error");
+          uiLog(cmdCtx, `无效数字: ${args[0]}`, "error");
         }
       } else {
-        cmdCtx.ui?.notify(`Current wave capacity: ${loadWaveSize(cmdCtx)}`, "info");
+        uiLog(cmdCtx, `当前并发上限: ${loadWaveSize(cmdCtx)}`, "info");
       }
     }
   });
@@ -54,30 +47,30 @@ export default async function explicitReactivePlugin(pi) {
         if (!core) return;
         const dbModule = core["gsd-db"];
         if (!dbModule || !dbModule.isDbAvailable()) {
-          cmdCtx.ui?.notify("Database unavailable.", "warning");
+          uiLog(cmdCtx, "Database unavailable.", "warning");
           return;
         }
 
         const stateModule = core["state"];
         const state = await stateModule.deriveState(process.cwd());
         if (!state?.activeSlice) {
-          cmdCtx.ui?.notify("No active slice running.", "info");
+          uiLog(cmdCtx, "当前没有正在运行的 Slice", "info");
           return;
         }
 
         const mid = state.activeMilestone.id;
         const sid = state.activeSlice.id;
         const allTaskIds = getTaskIds(process.cwd(), mid, sid, dbModule);
-        const wavePlan = loadWaves(process.cwd(), mid, sid, allTaskIds);
+        const wavePlan = loadWaves(cmdCtx, process.cwd(), mid, sid, allTaskIds);
 
         if (!wavePlan.ok) {
-          cmdCtx.ui?.notify(`WAVES.json invalid: ${wavePlan.reason}`, "error");
+          uiLog(cmdCtx, `WAVES.json 无效: ${wavePlan.reason}`, "error");
           return;
         }
-
-        const waveSize = loadWaveSize(cmdCtx);
-        cmdCtx.ui?.notify(`WAVES loaded successfully. Concurrency: ${waveSize}`, "info");
-      } catch {}
+        uiLog(cmdCtx, `WAVES 正常，当前并发配置: ${loadWaveSize(cmdCtx)}`, "info");
+      } catch (err) {
+        uiLog(cmdCtx, `执行出错: ${err.message}`, "error");
+      }
     }
   });
 }

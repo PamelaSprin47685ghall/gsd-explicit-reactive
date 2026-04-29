@@ -70,7 +70,7 @@ test("plugin-registration", async (t) => {
       assert.ok(core["auto-dispatch"], "should have auto-dispatch module");
 
       // Patch the rules
-      patchDispatchRules(core, {}, { ui: { notify: () => {} } });
+      patchDispatchRules(core, { ui: { notify: () => {} } });
 
       // Check that plan-slice was injected with WAVES.json prompt
       const planRule = core["auto-dispatch"].DISPATCH_RULES.find(r => r.name.includes("plan-slice"));
@@ -84,7 +84,7 @@ test("plugin-registration", async (t) => {
 
       // Check that plan-slice prompt was injected
       const planRes = await planRule.match({ mid: "M01", state: { activeSlice: { id: "S01" } } });
-      assert.ok(planRes.prompt.includes("CRITICAL: AGGRESSIVE FINE-GRAINED PARALLELISM"),
+      assert.ok(planRes.prompt.includes("HIGH-CONCURRENCY WAVES REQUIRED"),
         "plan-slice prompt should include WAVES.json injection");
     } finally {
       if (oldVal === undefined) delete process.env.GSD_CODING_AGENT_DIR;
