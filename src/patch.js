@@ -206,30 +206,20 @@ export function patchDispatchRules(core, pi, capturedCtx) {
     }
   }
 
-  // Hook 2: Hijack the execution rule by overwriting its match/where closure
-  // We explicitly ignore the GSD-2 native recovery rule so it can function normally
-  const execRules = allRules.filter(r =>
-    (r.name.includes("executing → reactive-execute") || r.name.includes("executing → execute-task")) &&
-    !r.name.includes("recover")
-  );
+  // Hook 2: Hijack ONLY the reactive execution rule, leaving the sequential
+  // execute-task rule intact as a native fallback when waves are complete.
+  const execRules = allRules.filter(r => r.name.includes("executing → reactive-execute"));
 
-  for (let i = 0; i < execRules.length; i++) {
-    const rule = execRules[i];
+  for (const rule of execRules) {
     if (rule._wavesPatched) continue;
 
+    const combinedFn = buildCombinedEnforcerExecutor(core, capturedCtx, waveSize);
+
     const isUnified = "where" in rule;
-    if (i === 0) {
-      const combinedFn = buildCombinedEnforcerExecutor(core, capturedCtx, waveSize);
-      if (isUnified) rule.where = combinedFn;
-      else rule.match = combinedFn;
-      rule.name = "executing → explicit-reactive-waves (enforced)";
-    } else {
-      // Physically disable subsequent normal execution rules so it absolutely cannot fall through to sequential execution
-      const nullFn = async () => null;
-      if (isUnified) rule.where = nullFn;
-      else rule.match = nullFn;
-      rule.name = `executing → disabled-by-explicit-waves-${i}`;
-    }
+    if (isUnified) rule.where = combinedFn;
+    else rule.match = combinedFn;
+
+    rule.name = "executing → explicit-reactive-waves (enforced)";
     rule._wavesPatched = true;
   }
 }
