@@ -27,14 +27,14 @@ async function createMockCore(dir) {
 
 test("plugin-registration", async (t) => {
   let sessionStartHandler;
-  let registeredCommand;
+  let registeredCommands = [];
 
   const mockPi = {
     on: (event, handler) => {
       if (event === "session_start") sessionStartHandler = handler;
     },
     registerCommand: (name, def) => {
-      registeredCommand = { name, def };
+      registeredCommands.push({ name, def });
     }
   };
 
@@ -43,8 +43,9 @@ test("plugin-registration", async (t) => {
     const registerPlugin = mod.default;
     registerPlugin(mockPi);
     assert.ok(sessionStartHandler, "should register session_start handler");
-    assert.ok(registeredCommand, "should register /wave-size command");
-    assert.strictEqual(registeredCommand.name, "wave-size");
+    assert.strictEqual(registeredCommands.length, 2, "should register two commands");
+    assert.ok(registeredCommands.find(c => c.name === "wave-size"), "should register /wave-size command");
+    assert.ok(registeredCommands.find(c => c.name === "wave-status"), "should register /wave-status command");
   });
 
   await t.test("session_start loads core and patches", async () => {
