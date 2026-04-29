@@ -4,97 +4,81 @@ import { loadWaveSize, saveWaveSize } from "./src/settings.js";
 import { getTaskIds, loadWaves } from "./src/waves.js";
 import { renderWaveDashboard } from "./src/ui.js";
 
-let capturedCtx = null;
 let patched = false;
 
-export default function explicitReactivePlugin(pi) {
-  pi.on("session_start", async (_event, ctx) => {
-    capturedCtx = ctx;
-    if (patched) return;
-    patched = true;
+export default async function explicitReactivePlugin(pi, ctx) {
+  try {
+    const core = await loadGsdCoreModules(ctx);
+    if (core && !patched) {
+      patched = true;
+      patchDispatchRules(core, pi, ctx);
+    }
+  } catch {}
 
+  pi.on("session_start", async (_event, captureCtx) => {
+    if (patched) return;
     try {
-      const core = await loadGsdCoreModules(capturedCtx);
-      if (!core) {
-        capturedCtx?.ui?.notify?.("Missing GSD core — explicit-reactive disabled.", "error");
-        return;
+      const core = await loadGsdCoreModules(captureCtx);
+      if (core) {
+        patched = true;
+        patchDispatchRules(core, pi, captureCtx);
       }
-      patchDispatchRules(core, pi, capturedCtx);
     } catch (err) {
-      capturedCtx?.ui?.notify?.(`Init failed: ${err.message}`, "error");
+      captureCtx?.ui?.notify?.(`Init failed: ${err.message}`, "error");
     }
   });
 
   pi.registerCommand("wave-size", {
     description: "Set maximum parallel task wave size (e.g. /wave-size 8)",
-    handler: async (args, ctx) => {
+    handler: async (args, cmdCtx) => {
       if (args.length > 0) {
         const size = parseInt(args[0], 10);
         if (!isNaN(size) && size > 0) {
-          if (saveWaveSize(size, ctx)) {
-            ctx.ui?.notify(`✅ Wave capacity set to: ${size}`, "success");
+          if (saveWaveSize(size, cmdCtx)) {
+            cmdCtx.ui?.notify(`✅ Wave capacity set to: ${size}`, "success");
           }
         } else {
-          ctx.ui?.notify(`Invalid number: ${args[0]}`, "error");
+          cmdCtx.ui?.notify(`Invalid number: ${args[0]}`, "error");
         }
       } else {
-        ctx.ui?.notify(`Current wave capacity: ${loadWaveSize(ctx)}`, "info");
+        cmdCtx.ui?.notify(`Current wave capacity: ${loadWaveSize(cmdCtx)}`, "info");
       }
     }
   });
 
   pi.registerCommand("wave-status", {
     description: "Display the current wave execution dashboard",
-    handler: async (args, ctx) => {
+    handler: async (args, cmdCtx) => {
       try {
-        const core = await loadGsdCoreModules(ctx);
+        const core = await loadGsdCoreModules(cmdCtx);
+        if (!core) return;
+
         const dbModule = core["gsd-db"];
         if (!dbModule || !dbModule.isDbAvailable()) {
-          ctx.ui?.notify("Database unavailable, cannot show wave status.", "warning");
+          cmdCtx.ui?.notify("Database unavailable.", "warning");
           return;
         }
 
-        const state = core["auto-dispatch"]?.deriveState?.(process.cwd());
+        const stateModule = core["state"];
+        const state = await stateModule.deriveState(process.cwd());
         if (!state?.activeSlice) {
-          ctx.ui?.notify("No active slice running.", "info");
+          cmdCtx.ui?.notify("No active slice running.", "info");
           return;
         }
 
         const mid = state.activeMilestone.id;
         const sid = state.activeSlice.id;
-        const allTaskIds = getTaskIds(process.cwd(), mid, sid);
+        const allTaskIds = getTaskIds(process.cwd(), mid, sid, dbModule);
         const wavePlan = loadWaves(process.cwd(), mid, sid, allTaskIds);
 
         if (!wavePlan.ok) {
-          ctx.ui?.notify(`WAVES.json is invalid: ${wavePlan.reason}`, "error");
+          cmdCtx.ui?.notify(`WAVES.json invalid: ${wavePlan.reason}`, "error");
           return;
         }
 
-        const statusMap = { completed: [], running: [], unstarted: [] };
-        for (const tid of allTaskIds) {
-          const dbTask = dbModule.getTask(mid, sid, tid);
-          const status = (dbTask?.status || "pending").toLowerCase();
-          const waveNum = wavePlan.waves[tid];
-
-          if (["complete", "done", "skipped", "success"].includes(status)) {
-            statusMap.completed.push({ id: tid, wave: waveNum });
-          } else if (["running", "in_progress", "active", "dispatched"].includes(status)) {
-            statusMap.running.push({ id: tid, wave: waveNum });
-          } else {
-            statusMap.unstarted.push({ id: tid, wave: waveNum });
-          }
-        }
-
-        const incomplete = [...statusMap.running, ...statusMap.unstarted]
-          .sort((a, b) => a.wave - b.wave);
-        const activeWave = incomplete.length > 0 ? incomplete[0].wave : 1;
-        const totalWaves = new Set(allTaskIds.map(id => wavePlan.waves[id])).size;
-        const waveSize = loadWaveSize(ctx);
-
-        ctx.ui?.notify(renderWaveDashboard(activeWave, totalWaves, waveSize, statusMap), "info");
-      } catch (err) {
-        ctx.ui?.notify(`Failed to load wave status: ${err.message}`, "error");
-      }
+        const waveSize = loadWaveSize(cmdCtx);
+        cmdCtx.ui?.notify(`WAVES loaded successfully. Concurrency: ${waveSize}`, "info");
+      } catch {}
     }
   });
 }
