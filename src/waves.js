@@ -19,9 +19,19 @@ export function loadWaves(basePath, mid, sid, allTaskIds) {
 
   let waves;
   try {
-    waves = JSON.parse(fs.readFileSync(waveFile, "utf-8"));
+    let raw = fs.readFileSync(waveFile, "utf-8").trim();
+    // Robustness: strip markdown code fences LLMs often add (```json ... ```)
+    raw = raw.replace(/^```[a-zA-Z]*\n?/i, "").replace(/```$/i, "").trim();
+    waves = JSON.parse(raw);
   } catch {
-    return { ok: false, reason: "WAVES.json contains malformed JSON" };
+    return { ok: false, reason: "WAVES.json contains malformed JSON or markdown artifacts." };
+  }
+
+  // Robustness: coerce string numbers ("1" → 1) so LLM string output doesn't break parsing
+  for (const key of Object.keys(waves)) {
+    if (typeof waves[key] === "string" && /^\d+$/.test(waves[key])) {
+      waves[key] = parseInt(waves[key], 10);
+    }
   }
 
   const definedTasks = new Set(Object.keys(waves));

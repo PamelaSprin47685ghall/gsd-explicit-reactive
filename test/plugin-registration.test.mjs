@@ -69,7 +69,7 @@ test("plugin-registration", async (t) => {
       const rules = autoDispatch.DISPATCH_RULES;
 
       const enforceRule = rules.find(r => r.name === "executing → enforce-explicit-waves");
-      const reactiveRule = rules.find(r => r.name === "executing → explicit-reactive-execute (parallel dispatch)");
+      const reactiveRule = rules.find(r => r.name === "executing → explicit-reactive-execute (true parallel dispatch)");
       assert.ok(enforceRule, "should inject enforce-explicit-waves rule");
       assert.ok(reactiveRule, "should inject explicit-reactive-execute rule");
 

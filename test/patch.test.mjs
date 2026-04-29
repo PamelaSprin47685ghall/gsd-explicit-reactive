@@ -50,7 +50,7 @@ test("patch", async (t) => {
 
     const rules = core["auto-dispatch"].DISPATCH_RULES;
     assert.ok(rules.find(r => r.name === "executing → enforce-explicit-waves"));
-    assert.ok(rules.find(r => r.name === "executing → explicit-reactive-execute (parallel dispatch)"));
+    assert.ok(rules.find(r => r.name === "executing → explicit-reactive-execute (true parallel dispatch)"));
     assert.ok(!rules.find(r => r.name.includes("reactive-execute (parallel dispatch)") &&
       !r.name.includes("explicit-")));
   });
