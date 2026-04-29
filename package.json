@@ -1,12 +1,10 @@
 {
   "name": "gsd-explicit-reactive",
-  "version": "3.0.0",
-  "description": "Explicit parallel task waves via WAVES.json sidecar — zero-dependency GSD extension",
+  "version": "4.0.0",
+  "description": "Explicit WAVES.json parallel task dispatch engine — rule-queue based, zero monkey-patch, GSD-native",
   "type": "module",
   "exports": "./index.js",
-  "scripts": {
-    "test": "node --test test/*.test.mjs"
-  },
+  "scripts": {},
   "gsd": {
     "extension": true
   },
