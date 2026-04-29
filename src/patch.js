@@ -1,6 +1,8 @@
 import { getTaskIds, loadWaves } from "./waves.js";
 import { loadWaveSize } from "./settings.js";
 import { renderWaveDashboard } from "./ui.js";
+import fs from "node:fs";
+import path from "node:path";
 
 const TASK_COLLATOR = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
@@ -38,6 +40,19 @@ function buildCombinedEnforcerExecutor(core, capturedCtx, waveSize) {
     if (state.phase !== "executing" || !state.activeTask || !state.activeSlice) return null;
 
     const sid = state.activeSlice.id;
+    const firstTid = state.activeTask.id;
+
+    // STAGE 0: Yield to GSD-2 native missing task plan recovery rule
+    const tasksDir = path.join(basePath, ".gsd", "milestones", mid, "slices", sid, "tasks");
+    if (fs.existsSync(tasksDir)) {
+      const files = fs.readdirSync(tasksDir);
+      if (!files.some(f => f.toUpperCase().startsWith(`${firstTid.toUpperCase()}-`))) {
+         return null; 
+      }
+    } else {
+       return null; 
+    }
+
     const sTitle = state.activeSlice.title;
     const dbModule = core["gsd-db"];
     const promptsModule = core["auto-prompts"];
@@ -49,18 +64,17 @@ function buildCombinedEnforcerExecutor(core, capturedCtx, waveSize) {
     const allTaskIds = getTaskIds(basePath, mid, sid, dbModule);
     if (allTaskIds.length === 0) return null;
 
-    // ----------------------------------------------------
     // STAGE 1: THE ENFORCER (Strict Validation)
-    // ----------------------------------------------------
     const wavePlan = loadWaves(basePath, mid, sid, allTaskIds);
     let errorReason = wavePlan.ok ? null : wavePlan.reason;
 
+    // Anti-Fake-Concurrency Check
     if (wavePlan.ok && allTaskIds.length > 3) {
       const waveNums = Object.values(wavePlan.waves);
       const uniqueWaves = new Set(waveNums).size;
       const avgTasks = allTaskIds.length / uniqueWaves;
       if (avgTasks < 1.5) {
-        errorReason = `Fake Concurrency Detected! ${allTaskIds.length} tasks spread across ${uniqueWaves} waves (avg ${avgTasks.toFixed(1)} tasks/wave). Redistribute tasks so each wave averages >= 1.5 tasks. Max capacity per wave is ${waveSize}.`;
+        errorReason = `Fake Concurrency Detected! ${allTaskIds.length} tasks spread across ${uniqueWaves} waves (avg ${avgTasks.toFixed(1)} tasks/wave). Redistribute tasks to maximize parallel execution. Independent tasks MUST share the same wave number. Max capacity per wave is ${waveSize}.`;
       }
     }
 
@@ -72,13 +86,11 @@ function buildCombinedEnforcerExecutor(core, capturedCtx, waveSize) {
         action: "dispatch",
         unitType: "plan-slice",
         unitId: `${mid}/${sid}`,
-        prompt: `# 🚨 RESTRUCTURE REQUIRED: Invalid or Sequential WAVES.json\n\n**Root Error:** ${errorReason}\n\nYou completely failed the concurrency requirement. You MUST REDESIGN the task breakdown and rewrite \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`.\n\n- **Smash tasks together:** Combine independent tasks into the SAME WAVE.\n- **Capacity:** You have a capacity of **${waveSize}** tasks per wave. Use it.\n- **Rule:** Do not give me a linear 1-by-1 plan.\n\nCall \`gsd_plan_slice\` with your highly-parallel restructured plan.`
+        prompt: `# 🚨 RESTRUCTURE REQUIRED: Invalid or Sequential WAVES.json\n\n**Root Error:** ${errorReason}\n\nYou failed the concurrency requirement. You MUST REDESIGN the task breakdown and rewrite \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`.\n\n- **Smash tasks together:** Combine independent tasks into the SAME WAVE.\n- **Capacity:** You have a capacity of **${waveSize}** tasks per wave. Use it.\n- **Rule:** Do not give me a linear 1-by-1 plan.\n\nCall \`gsd_plan_slice\` with your highly-parallel restructured plan.`
       };
     }
 
-    // ----------------------------------------------------
     // STAGE 2: THE EXECUTOR (True Parallel Dispatch)
-    // ----------------------------------------------------
     const statusMap = { completed: [], running: [], unstarted: [] };
     const dbAvailable = typeof dbModule?.isDbAvailable === "function" && dbModule.isDbAvailable();
 
@@ -195,20 +207,29 @@ export function patchDispatchRules(core, pi, capturedCtx) {
   }
 
   // Hook 2: Hijack the execution rule by overwriting its match/where closure
+  // We explicitly ignore the GSD-2 native recovery rule so it can function normally
   const execRules = allRules.filter(r =>
-    r.name.includes("executing → reactive-execute") || r.name.includes("executing → execute-task")
+    (r.name.includes("executing → reactive-execute") || r.name.includes("executing → execute-task")) &&
+    !r.name.includes("recover")
   );
 
-  for (const rule of execRules) {
+  for (let i = 0; i < execRules.length; i++) {
+    const rule = execRules[i];
     if (rule._wavesPatched) continue;
 
-    const combinedFn = buildCombinedEnforcerExecutor(core, capturedCtx, waveSize);
-
     const isUnified = "where" in rule;
-    if (isUnified) rule.where = combinedFn;
-    else rule.match = combinedFn;
-
-    rule.name = "executing → explicit-reactive-waves (enforced)";
+    if (i === 0) {
+      const combinedFn = buildCombinedEnforcerExecutor(core, capturedCtx, waveSize);
+      if (isUnified) rule.where = combinedFn;
+      else rule.match = combinedFn;
+      rule.name = "executing → explicit-reactive-waves (enforced)";
+    } else {
+      // Physically disable subsequent normal execution rules so it absolutely cannot fall through to sequential execution
+      const nullFn = async () => null;
+      if (isUnified) rule.where = nullFn;
+      else rule.match = nullFn;
+      rule.name = `executing → disabled-by-explicit-waves-${i}`;
+    }
     rule._wavesPatched = true;
   }
 }
