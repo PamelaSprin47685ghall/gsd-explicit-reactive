@@ -6,12 +6,12 @@ import { renderWaveDashboard } from "./src/ui.js";
 
 let patched = false;
 
-export default async function explicitReactivePlugin(pi, ctx) {
+export default async function explicitReactivePlugin(pi) {
   try {
-    const core = await loadGsdCoreModules(ctx);
+    const core = await loadGsdCoreModules(null);
     if (core && !patched) {
       patched = true;
-      patchDispatchRules(core, pi, ctx);
+      patchDispatchRules(core, pi);
     }
   } catch {}
 
@@ -21,7 +21,7 @@ export default async function explicitReactivePlugin(pi, ctx) {
       const core = await loadGsdCoreModules(captureCtx);
       if (core) {
         patched = true;
-        patchDispatchRules(core, pi, captureCtx);
+        patchDispatchRules(core, pi);
       }
     } catch (err) {
       captureCtx?.ui?.notify?.(`Init failed: ${err.message}`, "error");
@@ -52,7 +52,6 @@ export default async function explicitReactivePlugin(pi, ctx) {
       try {
         const core = await loadGsdCoreModules(cmdCtx);
         if (!core) return;
-
         const dbModule = core["gsd-db"];
         if (!dbModule || !dbModule.isDbAvailable()) {
           cmdCtx.ui?.notify("Database unavailable.", "warning");

@@ -6,7 +6,7 @@ import path from "node:path";
 
 const TASK_COLLATOR = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
-function injectWavesPrompt(prompt, waveSize) {
+function injectWavesPrompt(prompt, waveSize, mid, sid) {
   return prompt + `
 
 ## 🛑 CRITICAL: AGGRESSIVE FINE-GRAINED PARALLELISM (WAVES.json)
@@ -19,7 +19,8 @@ LLMs naturally write sequential plans. **BREAK THIS HABIT.**
 - Only place Task B in Wave N+1 if it *literally cannot be compiled/run* without Task A's output.
 
 ### 📝 WAVES.json Definition
-Create \`.gsd/milestones/\${milestoneId}/slices/\${sliceId}/WAVES.json\`. Map Task IDs to wave integers (1 = first, 2 = second).
+You MUST create \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`. 
+Map Task IDs to wave integers (1 = first, 2 = second).
 Concurrent capacity per wave: **${waveSize}**. Fill it up! Do NOT output a linear 1-by-1 plan.
 
 Example \`WAVES.json\`:
@@ -34,13 +35,14 @@ Example \`WAVES.json\`:
 `;
 }
 
-function buildCombinedEnforcerExecutor(core, capturedCtx, waveSize) {
+function buildCombinedEnforcerExecutor(core, allRules) {
   return async (ctx) => {
-    const { state, mid, midTitle, basePath, sessionContextWindow, modelRegistry } = ctx;
+    const { state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, session } = ctx;
     if (state.phase !== "executing" || !state.activeTask || !state.activeSlice) return null;
 
     const sid = state.activeSlice.id;
     const firstTid = state.activeTask.id;
+    const waveSize = loadWaveSize(session?.cmdCtx);
 
     // STAGE 0: Yield to GSD-2 native missing task plan recovery rule
     const tasksDir = path.join(basePath, ".gsd", "milestones", mid, "slices", sid, "tasks");
@@ -68,25 +70,38 @@ function buildCombinedEnforcerExecutor(core, capturedCtx, waveSize) {
     const wavePlan = loadWaves(basePath, mid, sid, allTaskIds);
     let errorReason = wavePlan.ok ? null : wavePlan.reason;
 
-    // Anti-Fake-Concurrency Check
     if (wavePlan.ok && allTaskIds.length > 3) {
       const waveNums = Object.values(wavePlan.waves);
       const uniqueWaves = new Set(waveNums).size;
       const avgTasks = allTaskIds.length / uniqueWaves;
       if (avgTasks < 1.5) {
-        errorReason = `Fake Concurrency Detected! ${allTaskIds.length} tasks spread across ${uniqueWaves} waves (avg ${avgTasks.toFixed(1)} tasks/wave). Redistribute tasks to maximize parallel execution. Independent tasks MUST share the same wave number. Max capacity per wave is ${waveSize}.`;
+        errorReason = `Fake Concurrency Detected! ${allTaskIds.length} tasks spread across ${uniqueWaves} waves (avg ${avgTasks.toFixed(1)} tasks/wave). Redistribute tasks so each wave averages >= 1.5 tasks. Max capacity per wave is ${waveSize}.`;
       }
     }
 
     if (errorReason) {
-      capturedCtx?.ui?.notify?.(`WAVES.json rejected: ${errorReason}`, "warning");
+      session?.cmdCtx?.ui?.notify?.(`WAVES.json rejected: ${errorReason}`, "warning");
       if (reactiveGraph?.clearReactiveState) reactiveGraph.clearReactiveState(basePath, mid, sid);
+
+      const planRule = allRules.find(r => r.name.includes("planning → plan-slice"));
+      if (planRule) {
+        const originalPhase = state.phase;
+        state.phase = "planning";
+        const isUnified = "where" in planRule;
+        const planResult = await (isUnified ? planRule.where(ctx) : planRule.match(ctx));
+        state.phase = originalPhase;
+
+        if (planResult && planResult.prompt) {
+          planResult.prompt = `# 🚨 RESTRUCTURE REQUIRED: Invalid or Sequential WAVES.json\n\n**Root Error:** ${errorReason}\n\nYou completely failed the concurrency requirement. You MUST REDESIGN the task breakdown and rewrite \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`.\n\n---\n\n` + planResult.prompt;
+          return planResult;
+        }
+      }
 
       return {
         action: "dispatch",
         unitType: "plan-slice",
         unitId: `${mid}/${sid}`,
-        prompt: `# 🚨 RESTRUCTURE REQUIRED: Invalid or Sequential WAVES.json\n\n**Root Error:** ${errorReason}\n\nYou failed the concurrency requirement. You MUST REDESIGN the task breakdown and rewrite \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`.\n\n- **Smash tasks together:** Combine independent tasks into the SAME WAVE.\n- **Capacity:** You have a capacity of **${waveSize}** tasks per wave. Use it.\n- **Rule:** Do not give me a linear 1-by-1 plan.\n\nCall \`gsd_plan_slice\` with your highly-parallel restructured plan.`
+        prompt: `# 🚨 RESTRUCTURE REQUIRED: Invalid WAVES.json\n\n**Error:** ${errorReason}\n\nPlease generate a valid \`.gsd/milestones/${mid}/slices/${sid}/WAVES.json\`.`
       };
     }
 
@@ -133,7 +148,7 @@ function buildCombinedEnforcerExecutor(core, capturedCtx, waveSize) {
 
     const totalWaves = [...new Set(Object.values(wavePlan.waves))].length;
     const dashboardMd = renderWaveDashboard(activeWave, totalWaves, waveSize, statusMap);
-    capturedCtx?.ui?.notify?.(dashboardMd, "info");
+    session?.cmdCtx?.ui?.notify?.(dashboardMd, "info");
 
     if (reactiveGraph?.saveReactiveState) {
       reactiveGraph.saveReactiveState(basePath, mid, sid, {
@@ -165,10 +180,9 @@ function buildCombinedEnforcerExecutor(core, capturedCtx, waveSize) {
   };
 }
 
-export function patchDispatchRules(core, pi, capturedCtx) {
+export function patchDispatchRules(core, pi) {
   const autoDispatchModule = core["auto-dispatch"];
   const registryModule = core["rule-registry"];
-  const waveSize = loadWaveSize(capturedCtx);
 
   const rawRules = autoDispatchModule?.DISPATCH_RULES || [];
 
@@ -192,9 +206,11 @@ export function patchDispatchRules(core, pi, capturedCtx) {
       const originalFn = isUnified ? rule.where : rule.match;
 
       const newFn = async (...args) => {
+        const ctx = args[0];
+        const waveSize = loadWaveSize(ctx.session?.cmdCtx);
         const result = await originalFn(...args);
         if (result && result.action === "dispatch" && result.prompt) {
-          result.prompt = injectWavesPrompt(result.prompt, waveSize);
+          result.prompt = injectWavesPrompt(result.prompt, waveSize, ctx.mid, ctx.state.activeSlice.id);
         }
         return result;
       };
@@ -206,14 +222,13 @@ export function patchDispatchRules(core, pi, capturedCtx) {
     }
   }
 
-  // Hook 2: Hijack ONLY the reactive execution rule, leaving the sequential
-  // execute-task rule intact as a native fallback when waves are complete.
+  // Hook 2: Hijack ONLY the reactive execution rule
   const execRules = allRules.filter(r => r.name.includes("executing → reactive-execute"));
 
   for (const rule of execRules) {
     if (rule._wavesPatched) continue;
 
-    const combinedFn = buildCombinedEnforcerExecutor(core, capturedCtx, waveSize);
+    const combinedFn = buildCombinedEnforcerExecutor(core, allRules);
 
     const isUnified = "where" in rule;
     if (isUnified) rule.where = combinedFn;
