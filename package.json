@@ -1,7 +1,7 @@
 {
   "name": "gsd-explicit-reactive",
-  "version": "4.0.0",
-  "description": "Explicit WAVES.json parallel task dispatch engine — rule-queue based, zero monkey-patch, GSD-native",
+  "version": "5.0.0",
+  "description": "Explicit DEPS.json DAG-based parallel task dispatch engine — declaration-driven, zero monkey-patch, GSD-native",
   "type": "module",
   "exports": "./index.js",
   "scripts": {},
@@ -9,6 +9,8 @@
     "extension": true
   },
   "pi": {
-    "extensions": ["index.js"]
+    "extensions": [
+      "index.js"
+    ]
   }
 }

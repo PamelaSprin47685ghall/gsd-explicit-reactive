@@ -1,13 +1,15 @@
 {
   "id": "explicit-reactive",
-  "name": "Explicit Reactive (Explicit Waves)",
-  "version": "3.0.0",
-  "description": "Overrides parallel dispatch to use deterministic explicit WAVES.json instead of implicit file dependencies. Modularized following gsd-context-prune architecture patterns.",
+  "name": "Explicit Reactive (DAG)",
+  "version": "5.0.0",
+  "description": "Overrides parallel dispatch with deterministic explicit DEPS.json DAG declarations. Validates, detects cycles, drives background task agents.",
   "tier": "community",
   "requires": {
     "platform": ">=2.29.0"
   },
   "provides": {
-    "hooks": ["session_start", "command"]
+    "hooks": [
+      "session_start"
+    ]
   }
 }

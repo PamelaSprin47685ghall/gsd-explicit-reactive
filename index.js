@@ -1,38 +1,36 @@
+import { injectExplicitDagEngine } from "./src/engine.js";
+import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
-import { injectExplicitWavesEngine } from "./src/engine.js";
-
-let engineInjected = false;
-let currentWaveSize = 8;
 
 export default async function explicitReactivePlugin(pi) {
-  pi.on("session_start", async (_event, captureCtx) => {
-    if (engineInjected) return;
+  // Create and start the DAG status widget once
+  const dagWidget = createDagStatusWidget(pi);
+  pi._dagWidget = dagWidget;
 
+  // The DagTaskManager is stored here for session_shutdown cleanup.
+  // injectExplicitDagEngine will set pi._dagTaskManager when DAG executes.
+  pi._dagTaskManager = null;
+
+  pi.on("session_start", async (_event, captureCtx) => {
+    // injectExplicitDagEngine is idempotent via rules._dagInjected guard,
+    // so no module-level engineInjected flag is needed.
     try {
       const core = await loadGsdCore();
-      if (core) {
-        injectExplicitWavesEngine(core, captureCtx, () => currentWaveSize);
-        engineInjected = true;
+      if (!core) {
+        pi.ui?.notify?.("[DAG] GSD core modules not found. Plugin disabled.", "warning");
+        return;
       }
+      injectExplicitDagEngine(core, pi);
     } catch (err) {
-      pi.ui?.notify?.(`[Explicit Waves] 初始化失败: ${err.message}`, "error");
+      pi.ui?.notify?.(`[DAG] Initialization failed: ${err.message}`, "error");
     }
   });
 
-  pi.registerCommand("wave-size", {
-    description: "设置或查看当前的最大并行波次限制 (e.g. /wave-size 5)",
-    handler: async (args, cmdCtx) => {
-      if (args.length > 0) {
-        const size = parseInt(args[0], 10);
-        if (!isNaN(size) && size > 0) {
-          currentWaveSize = size;
-          cmdCtx.ui?.notify?.(`✅ Explicit Waves: 并发上限已修改为 ${size}`, "success");
-        } else {
-          cmdCtx.ui?.notify?.(`❌ 无效的并发数: ${args[0]}`, "error");
-        }
-      } else {
-        cmdCtx.ui?.notify?.(`🌊 当前并发上限: ${currentWaveSize} 个任务/波次`, "info");
-      }
+  // Issue 9: Clean up background agents on session shutdown
+  pi.on("session_shutdown", async () => {
+    if (pi._dagTaskManager) {
+      pi._dagTaskManager.abortAll();
+      pi._dagTaskManager = null;
     }
   });
 }
