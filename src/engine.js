@@ -10,6 +10,13 @@ const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` 
 
 const waitToolRegistered = new WeakSet();
 
+const isPrimaryExecuteTaskRule = (ruleName) => {
+  if (typeof ruleName !== "string") return false;
+  if (!ruleName.includes("executing → execute-task")) return false;
+  if (ruleName.includes("recover missing task plan")) return false;
+  return true;
+};
+
 const disableOfficialRules = (rules) => {
   rules.filter(r => r.name?.includes("reactive-execute") && !r._dagDisabled).forEach(r => {
     r._dagDisabled = true;
@@ -17,7 +24,7 @@ const disableOfficialRules = (rules) => {
     r.match = async () => null;
     r.name = `[DAG Disabled] ${r.name}`;
   });
-  rules.filter(r => r.name?.includes("execute-task") && !r._dagDisabled).forEach(r => {
+  rules.filter(r => isPrimaryExecuteTaskRule(r.name) && !r._dagDisabled).forEach(r => {
     r._dagDisabled = true;
     r._dagOriginalName = r.name;
     r.match = async () => null;

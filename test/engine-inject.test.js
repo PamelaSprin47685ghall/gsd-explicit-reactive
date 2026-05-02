@@ -11,12 +11,16 @@ function createMockCore() {
     name: "executing → reactive-execute (parallel dispatch)",
     match: async () => ({ action: "dispatch", unitType: "reactive-execute" }),
   };
+  const executeRecoverRule = {
+    name: "executing → execute-task (recover missing task plan → plan-slice)",
+    match: async () => ({ action: "dispatch", unitType: "plan-slice" }),
+  };
   const executeRule = {
     name: "executing → execute-task",
     match: async () => ({ action: "dispatch", unitType: "execute-task" }),
   };
 
-  const rules = [planRule, reactiveRule, executeRule];
+  const rules = [planRule, reactiveRule, executeRecoverRule, executeRule];
 
   const initRegistry = mock.fn(() => undefined);
   const convertDispatchRules = mock.fn((dispatchRules) => dispatchRules.map((rule) => ({
@@ -50,15 +54,18 @@ describe("injectExplicitDagEngine", () => {
     assert.strictEqual(dagRules.length, 1);
 
     const disabledReactive = rules.find((rule) => String(rule.name).includes("reactive-execute"));
-    const disabledExecute = rules.find((rule) => String(rule.name).includes("execute-task"));
+    const disabledExecute = rules.find((rule) => String(rule.name).startsWith("[DAG Disabled] executing → execute-task"));
+    const recoverRule = rules.find((rule) => String(rule.name).includes("recover missing task plan"));
 
     assert.ok(disabledReactive.name.startsWith("[DAG Disabled]"));
     assert.ok(disabledExecute.name.startsWith("[DAG Disabled]"));
 
     const reactiveResult = await disabledReactive.match({});
     const executeResult = await disabledExecute.match({});
+    const recoverResult = await recoverRule.match({});
     assert.strictEqual(reactiveResult, null);
     assert.strictEqual(executeResult, null);
+    assert.ok(recoverResult?.unitType === "plan-slice");
 
     const planRule = rules.find((rule) => String(rule.name).includes("plan-slice"));
     const planResult = await planRule.match({});

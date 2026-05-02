@@ -31,12 +31,16 @@ function createCoreWithRules(tasks) {
     match: async () => ({ action: "dispatch", unitType: "reactive-execute" }),
   };
 
+  const executeRecoverRule = {
+    name: "executing → execute-task (recover missing task plan → plan-slice)",
+    match: async () => ({ action: "dispatch", unitType: "plan-slice", unitId: "M001/S01" }),
+  };
   const executeRule = {
     name: "executing → execute-task",
     match: async () => ({ action: "dispatch", unitType: "execute-task" }),
   };
 
-  const rules = [planRule, reactiveRule, executeRule];
+  const rules = [planRule, reactiveRule, executeRecoverRule, executeRule];
 
   const core = {
     "auto-dispatch": { DISPATCH_RULES: rules },
