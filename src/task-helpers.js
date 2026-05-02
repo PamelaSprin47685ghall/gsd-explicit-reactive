@@ -38,9 +38,37 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
 
 export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
   try {
-    const result = await createAgentSessionFn({
+    // Inherit full configuration from main session context
+    const options = {
       cwd: ctx?.cwd ?? process.cwd(),
-    });
+    };
+    
+    // Inherit resourceLoader if available (ensures extensions are loaded)
+    if (ctx?.resourceLoader) {
+      options.resourceLoader = ctx.resourceLoader;
+    }
+    
+    // Inherit agentDir if available (ensures correct extension paths)
+    if (ctx?.agentDir) {
+      options.agentDir = ctx.agentDir;
+    }
+    
+    // Inherit modelRegistry if available
+    if (ctx?.modelRegistry) {
+      options.modelRegistry = ctx.modelRegistry;
+    }
+    
+    // Inherit settingsManager if available
+    if (ctx?.settingsManager) {
+      options.settingsManager = ctx.settingsManager;
+    }
+    
+    // Inherit sessionManager if available
+    if (ctx?.sessionManager) {
+      options.sessionManager = ctx.sessionManager;
+    }
+    
+    const result = await createAgentSessionFn(options);
     return result.session;
   } catch (err) {
     throw new Error(`Failed to create agent session for ${taskId}: ${err.message}`);

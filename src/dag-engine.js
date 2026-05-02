@@ -18,6 +18,16 @@ export class DagTaskManager {
     const session = await createTaskSession(taskId, ctx, createAgentSessionFn)
       .catch(err => { this.abortControllers.delete(taskId); throw err; });
 
+    // Verify and log available tools
+    const availableTools = session.getActiveToolNames?.() ?? [];
+    ctx?.ui?.notify?.(`[${taskId}] Available tools: ${availableTools.join(", ")}`, "info");
+    
+    if (!availableTools.includes("gsd_task_complete") && !availableTools.includes("gsd_complete_task")) {
+      const errorMsg = `Task session for ${taskId} missing gsd_task_complete tool. Available: ${availableTools.join(", ")}`;
+      ctx?.ui?.notify?.(errorMsg, "error");
+      throw new Error(errorMsg);
+    }
+
     session.setActiveToolsByName?.((session.getActiveToolNames?.() ?? []).filter(t => t !== "_wait_for_dag_completion"));
 
     const record = { session, status: "running", startedAt: this.agents.get(taskId)?.startedAt ?? Date.now(), unsubscribes: [] };
