@@ -7,16 +7,14 @@ import { payloadStore } from "./payload-store.js";
 const width1Warned = new Map();
 
 const disableOfficialRules = (rules) => {
-  const re = rules.find(r => r.name?.includes("reactive-execute"));
-  if (re) {
-    re.match = async () => null;
-    re.name = "[DAG Disabled] reactive-execute";
-  }
-  const et = rules.find(r => r.name?.includes("execute-task"));
-  if (et) {
-    et.match = async () => null;
-    et.name = "[DAG Disabled] execute-task";
-  }
+  rules.filter(r => r.name?.includes("reactive-execute")).forEach(r => {
+    r.match = async () => null;
+    r.name = `[DAG Disabled] ${r.name}`;
+  });
+  rules.filter(r => r.name?.includes("execute-task")).forEach(r => {
+    r.match = async () => null;
+    r.name = `[DAG Disabled] ${r.name}`;
+  });
 };
 
 const registerDagRule = (rules, core, autoDispatch, dagWidget, dagTaskManagers) => {
