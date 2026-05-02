@@ -8,7 +8,7 @@ export class DagTaskManager {
     this.abortControllers = new Map();
   }
 
-  async runTask(taskId, planContent, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx) {
+  async runTask(taskId, planContent, dynamicToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx) {
     if (!createAgentSessionFn) throw new Error("createAgentSession function not provided to runTask");
 
     const taskAbort = new AbortController();
@@ -49,7 +49,7 @@ export class DagTaskManager {
     setupSessionAbort(session, taskAbort, record);
 
     try {
-      await runTaskLoop(session, taskId, buildTaskPrompt(taskId, planContent, contextToolkit), contextToolkit, abortSignal, taskAbort, record);
+      await runTaskLoop(session, taskId, buildTaskPrompt(taskId, planContent, dynamicToolkit), dynamicToolkit, abortSignal, taskAbort, record);
     } finally {
       record.unsubscribes.forEach(unsub => { try { unsub(); } catch {} });
       record.unsubscribes = [];
