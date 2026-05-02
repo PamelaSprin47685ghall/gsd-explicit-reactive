@@ -105,7 +105,7 @@ export const setupSessionAbort = (session, taskAbort, record) => {
   }
 };
 
-export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, abortSignal, taskAbort, record) => {
+export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, abortSignal, taskAbort, record, ctx) => {
   let currentPrompt = basePrompt;
   let retryCount = 0;
   let emptyTurnCount = 0;

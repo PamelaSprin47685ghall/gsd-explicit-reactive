@@ -8,80 +8,56 @@ const width1Warned = new Map();
 
 const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` file in the same directory as `PLAN.md` to define task dependencies for parallel execution. Format:\n```json\n{\n  \"version\": 1,\n  \"tasks\": {\n    \"T01\": { \"depends_on\": [] },\n    \"T02\": { \"depends_on\": [\"T01\"] }\n  }\n}\n```";
 
+const waitToolRegistered = new WeakSet();
+
 const disableOfficialRules = (rules) => {
-  rules.filter(r => r.name?.includes("reactive-execute")).forEach(r => {
+  rules.filter(r => r.name?.includes("reactive-execute") && !r._dagDisabled).forEach(r => {
+    r._dagDisabled = true;
+    r._dagOriginalName = r.name;
     r.match = async () => null;
     r.name = `[DAG Disabled] ${r.name}`;
   });
-  rules.filter(r => r.name?.includes("execute-task")).forEach(r => {
+  rules.filter(r => r.name?.includes("execute-task") && !r._dagDisabled).forEach(r => {
+    r._dagDisabled = true;
+    r._dagOriginalName = r.name;
     r.match = async () => null;
     r.name = `[DAG Disabled] ${r.name}`;
   });
 };
 
-const disableRegistryRules = (rules) => {
-  rules.filter(r => r.name?.includes("reactive-execute")).forEach(r => {
-    r.where = async () => null;
-    r.name = `[DAG Disabled] ${r.name}`;
-  });
-  rules.filter(r => r.name?.includes("execute-task")).forEach(r => {
-    r.where = async () => null;
-    r.name = `[DAG Disabled] ${r.name}`;
-  });
-};
 
-const patchRegistryPlanRule = (rules) => {
+const registerDagRule = (rules, dagRule) => {
+  if (!rules.some(r => r.name === dagRule.name)) {
+    const reactiveIdx = rules.findIndex(r => r.name?.includes("reactive-execute"));
+    if (reactiveIdx >= 0) {
+      rules.splice(reactiveIdx, 0, dagRule);
+    } else {
+      const execIdx = rules.findIndex(r => r.name?.includes("executing →") || r.name?.includes("executing"));
+      if (execIdx >= 0) rules.splice(execIdx, 0, dagRule);
+      else rules.push(dagRule);
+    }
+  }
+
   const planRule = rules.find(r => r.name?.includes("plan-slice"));
   if (planRule && !planRule._dagPatched) {
     planRule._dagPatched = true;
-    const originalWhere = planRule.where;
-    planRule.where = async (ctx) => {
-      const result = await originalWhere(ctx);
-      if (result && result.prompt) {
-        result.prompt += DEPS_PROMPT_HINT;
-      }
-      return result;
-    };
-  }
-};
-
-const registerDagRule = (rules, dagRule) => {
-  if (rules._dagInjected) return;
-  
-  // Patch plan-slice to demand DEPS.json
-  const planRule = rules.find(r => r.name?.includes("plan-slice"));
-  if (planRule) {
     const originalMatch = planRule.match;
     planRule.match = async (ctx) => {
       const result = await originalMatch(ctx);
-      if (result && result.prompt) {
+      if (result && result.prompt && !result.prompt.includes("DEPS.json")) {
         result.prompt += DEPS_PROMPT_HINT;
       }
       return result;
     };
   }
-
-  const reactiveIdx = rules.findIndex(r => r.name?.includes("reactive-execute"));
-  if (reactiveIdx >= 0) {
-    rules.splice(reactiveIdx, 0, dagRule);
-  } else {
-    const execIdx = rules.findIndex(r => r.name?.includes("executing →") || r.name?.includes("executing"));
-    if (execIdx >= 0) rules.splice(execIdx, 0, dagRule);
-    else rules.push(dagRule);
-  }
 };
 
-const registerRegistryDagRule = (rules, dagRule, convertFn) => {
-  if (rules.some(r => r.name === dagRule.name)) return;
-  const unifiedDagRule = convertFn([dagRule])[0];
-  const reactiveIdx = rules.findIndex(r => r.name?.includes("reactive-execute"));
-  if (reactiveIdx >= 0) {
-    rules.splice(reactiveIdx, 0, unifiedDagRule);
-  } else {
-    const execIdx = rules.findIndex(r => r.name?.includes("executing"));
-    if (execIdx >= 0) rules.splice(execIdx, 0, unifiedDagRule);
-    else rules.push(unifiedDagRule);
-  }
+
+const emitDagDispatchLog = (ctx, payload) => {
+  const mid = ctx?.mid ?? "unknown-mid";
+  const sid = ctx?.state?.activeSlice?.id ?? "unknown-slice";
+  const line = `[dag-dispatch] ${mid}/${sid} ${JSON.stringify(payload)}\n`;
+  try { process.stderr.write(line); } catch {}
 };
 
 const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, pi) => {
@@ -107,6 +83,9 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
 };
 
 const registerWaitTool = (pi, dagTaskManagers) => {
+  if (waitToolRegistered.has(pi)) return;
+  waitToolRegistered.add(pi);
+
   pi.registerTool({
     name: "_wait_for_dag_completion",
     label: "Wait for DAG Completion",
@@ -118,40 +97,27 @@ const registerWaitTool = (pi, dagTaskManagers) => {
 
 export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTaskManagers) {
   const autoDispatch = core["auto-dispatch"];
+  const ruleRegistry = core["rule-registry"];
   if (!autoDispatch?.DISPATCH_RULES) return;
   const rules = autoDispatch.DISPATCH_RULES;
-  
+
   const dagRule = {
     name: "executing → dag-execution",
     match: async (ctx) => executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers),
   };
 
-  if (!rules._dagInjected) {
-    rules._dagInjected = true;
-    disableOfficialRules(rules);
-    registerDagRule(rules, dagRule);
-    registerWaitTool(pi, dagTaskManagers);
-  }
+  disableOfficialRules(rules);
+  registerDagRule(rules, dagRule);
+  registerWaitTool(pi, dagTaskManagers);
 
-  // Patch the Registry if it exists and is initialized
-  try {
-    const registryMod = core["rule-registry"];
-    if (registryMod && typeof registryMod.getRegistry === "function") {
-      const registry = registryMod.getRegistry();
-      if (registry && Array.isArray(registry.dispatchRules)) {
-        disableRegistryRules(registry.dispatchRules);
-        patchRegistryPlanRule(registry.dispatchRules);
-        
-        // Use a modified version of dagRule for the registry (if convertDispatchRules is available)
-        const registryDagRule = {
-          name: "executing → dag-execution",
-          match: async (ctx) => executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers),
-        };
-        registerRegistryDagRule(registry.dispatchRules, registryDagRule, registryMod.convertDispatchRules);
-      }
+  if (ruleRegistry?.initRegistry && ruleRegistry?.convertDispatchRules) {
+    try {
+      const unifiedRules = ruleRegistry.convertDispatchRules(rules);
+      ruleRegistry.initRegistry(unifiedRules);
+      sessionCtx?.ui?.notify?.("[DAG] Dispatch registry synchronized.", "info");
+    } catch (err) {
+      sessionCtx?.ui?.notify?.(`[DAG] Registry sync failed: ${err.message}`, "warning");
     }
-  } catch (err) {
-    // Registry not initialized yet, will be initialized later with modified DISPATCH_RULES
   }
 }
 
@@ -190,7 +156,16 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
   }
 
   const key = `${mid}/${sid}`;
-  const { totalTasks, averageWidth } = calculateDagMetrics(deps);
+  const { totalTasks, averageWidth, criticalPathLength } = calculateDagMetrics(deps);
+  emitDagDispatchLog(ctx, {
+    event: "ready-set",
+    totalTasks,
+    criticalPathLength,
+    averageWidth: Number(averageWidth.toFixed(3)),
+    completedCount: completedIds.size,
+    readyCount: ready.length,
+    ready,
+  });
   if (totalTasks >= 3 && averageWidth < 1.5 && !width1Warned.has(key)) {
     width1Warned.set(key, true);
     persistLatestError(basePath, mid, sid, `DAG average concurrency width is ${averageWidth.toFixed(2)} (< 1.5). Please restructure dependencies to allow more parallel execution.`, deps, ctx);
@@ -201,6 +176,7 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
   width1Warned.delete(key);
 
   ctx?.ui?.notify?.(`[DAG] Starting parallel execution for ${ready.length} tasks: ${ready.join(", ")}`, "info");
+  emitDagDispatchLog(ctx, { event: "dispatch", unitType: "dag-execution", ready });
 
   // Mark all ready tasks as in_progress so GSD state machine knows they're being executed
   for (const taskId of ready) {

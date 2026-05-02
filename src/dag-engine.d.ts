@@ -42,25 +42,14 @@ export class DagTaskManager {
   
   /**
    * Run a single task agent with infinite retry loop.
-   * @param taskId - Task identifier (e.g. "T01")
-   * @param planContent - Task plan markdown content
-   * @param contextToolkit - Context for task agent prompt
-   * @param createAgentSessionFn - createAgentSession from pi-coding-agent
-   * @param sessionManager - Isolated SessionManager
-   * @param settingsManager - Isolated SettingsManager
-   * @param agentDir - Agent directory path
-   * @param abortSignal - Signal to abort execution
-   * @param ctx - ExtensionContext for ui.notify
    */
   runTask(
     taskId: string,
     planContent: string,
     contextToolkit: ContextToolkit,
     createAgentSessionFn: Function,
-    sessionManager: any,
-    settingsManager: any,
-    agentDir: string,
     abortSignal?: AbortSignal,
+    onUpdate?: (chunk: { type: string; text: string }) => void,
     ctx?: any
   ): Promise<void>;
   
@@ -77,9 +66,7 @@ export class DagTaskManager {
  * @param widget - Optional dag-status widget instance
  * @param createAgentSessionFn - createAgentSession from pi-coding-agent
  * @param abortSignal - Signal to abort the entire DAG execution
- * @param sessionManager - Isolated SessionManager
- * @param settingsManager - Isolated SettingsManager
- * @param agentDir - Agent directory path
+ * @param onUpdate - Streaming callback for forwarded task output
  * @param ctx - ExtensionContext for ui.notify
  * @param dagTaskManagers - Map of sessionId -> DagTaskManager
  */
@@ -91,9 +78,7 @@ export function dagExecutionLoop(
   widget: any,
   createAgentSessionFn: Function,
   abortSignal?: AbortSignal,
-  sessionManager?: any,
-  settingsManager?: any,
-  agentDir?: string,
+  onUpdate?: (chunk: { type: string; text: string }) => void,
   ctx?: any,
   dagTaskManagers?: Map<string, DagTaskManager>
 ): Promise<DagExecutionResult>;

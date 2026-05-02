@@ -49,7 +49,7 @@ export class DagTaskManager {
     setupSessionAbort(session, taskAbort, record);
 
     try {
-      await runTaskLoop(session, taskId, buildTaskPrompt(taskId, planContent, dynamicToolkit), dynamicToolkit, abortSignal, taskAbort, record);
+      await runTaskLoop(session, taskId, buildTaskPrompt(taskId, planContent, dynamicToolkit), dynamicToolkit, abortSignal, taskAbort, record, ctx);
     } finally {
       record.unsubscribes.forEach(unsub => { try { unsub(); } catch {} });
       record.unsubscribes = [];
@@ -150,12 +150,21 @@ const handleStall = async (readyIds, running, stallCount, allTasks, completedIds
   return newStallCount;
 };
 
+const emitDagRuntimeLog = (contextToolkit, payload) => {
+  const mid = contextToolkit?.mid ?? "unknown-mid";
+  const sid = contextToolkit?.sid ?? "unknown-slice";
+  const line = `[dag-runtime] ${mid}/${sid} ${JSON.stringify(payload)}\n`;
+  try { process.stderr.write(line); } catch {}
+};
+
 export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widget, createAgentSessionFn, abortSignal, onUpdate, ctx, dagTaskManagers) {
   if (!createAgentSessionFn) throw new Error("createAgentSession function not provided to dagExecutionLoop");
 
   const sessionId = ctx?.sessionManager?.getSessionId?.();
   const { manager, completedIds, failedIds, running, stallCount: initialStall } = initDagState(allTasks, sessionId, dagTaskManagers);
   let stallCount = initialStall;
+  let dispatchCycles = 0;
+  let peakRunning = 0;
 
   const onDagAbort = () => manager.abortAll();
   if (abortSignal) abortSignal.addEventListener("abort", onDagAbort);
@@ -195,13 +204,32 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
 
       const readyIds = computeReadySet(deps, allTasks, completedIds).filter(id => !completedIds.has(id) && !running.has(id) && !manager.failedTasks.has(id));
 
+      emitDagRuntimeLog(contextToolkit, {
+        event: "tick",
+        completed: completedIds.size,
+        total: allTasks.length,
+        running: running.size,
+        readyCount: readyIds.length,
+        ready: readyIds,
+        failed: manager.failedTasks.size,
+      });
+
       if (checkDeadlock(readyIds, running, allTasks, completedIds, failedIds)) break;
 
       stallCount = await handleStall(readyIds, running, stallCount, allTasks, completedIds, ctx);
       if (readyIds.length === 0) continue;
 
       ctx?.ui?.notify?.(`[DAG] Spawning tasks: ${readyIds.join(", ")}`, "info");
+      dispatchCycles += 1;
       spawnReadyTasks(readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx, failedIds);
+      peakRunning = Math.max(peakRunning, running.size);
+      emitDagRuntimeLog(contextToolkit, {
+        event: "spawn",
+        cycle: dispatchCycles,
+        spawned: readyIds,
+        runningAfterSpawn: running.size,
+        peakRunning,
+      });
       updateWidget();
       stallCount = 0;
       if (running.size > 0) {
@@ -212,6 +240,15 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
     }
 
     updateWidget();
+    emitDagRuntimeLog(contextToolkit, {
+      event: "completed",
+      completed: completedIds.size,
+      total: allTasks.length,
+      dispatchCycles,
+      peakRunning,
+      failed: manager.failedTasks.size,
+    });
+    ctx?.ui?.notify?.(`[DAG] Completed ${completedIds.size}/${allTasks.length} tasks (peak parallel: ${peakRunning}).`, "success");
     return { completed: [...completedIds], total: allTasks.length };
   } finally {
     clearInterval(widgetInterval);

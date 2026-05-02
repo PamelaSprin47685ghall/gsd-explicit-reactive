@@ -37,7 +37,7 @@ export function validateExplicitDeps(deps: DepsSpec, sliceTasks: any[]): Validat
 /**
  * Compute the set of ready-to-execute tasks given DEPS and current statuses.
  */
-export function computeReadySet(deps: DepsSpec, allTasks: any[]): string[];
+export function computeReadySet(deps: DepsSpec, allTasks: any[], completedIds?: Set<string>): string[];
 
 /**
  * Calculate average concurrency width of a DAG.
