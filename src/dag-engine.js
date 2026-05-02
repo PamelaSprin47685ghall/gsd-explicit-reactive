@@ -203,7 +203,9 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       spawnReadyTasks(readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx, failedIds);
       updateWidget();
       stallCount = 0;
-      await Promise.race(running.values());
+      if (running.size > 0) {
+        await Promise.race(running.values());
+      }
       updateWidget();
       await new Promise(r => setImmediate(r));
     }
