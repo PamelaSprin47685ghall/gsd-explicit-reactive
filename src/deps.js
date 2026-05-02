@@ -9,11 +9,18 @@ export function loadDepsError(basePath, mid, sid) {
 }
 
 const validateBasicStructure = (deps, errors) => {
+  if (!deps || typeof deps !== "object" || Array.isArray(deps)) {
+    errors.push("DEPS must be a plain object");
+    return false;
+  }
   if (Array.isArray(deps.tasks)) {
     errors.push("deps.tasks must be a plain object, not an array");
     return false;
   }
-  if (deps.version !== 1) errors.push(`Unsupported DEPS version: ${deps.version}`);
+  if (deps.version !== 1) {
+    errors.push(`Unsupported DEPS version: ${deps.version}`);
+    // return true intentionally so we can accumulate more errors downstream
+  }
   return true;
 };
 

@@ -143,7 +143,35 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
   const onDagAbort = () => manager.abortAll();
   if (abortSignal) abortSignal.addEventListener("abort", onDagAbort);
 
+  const updateWidget = () => {
+    if (!widget) return;
+    const currentReady = computeReadySet(deps, allTasks);
+    const tasks = allTasks.map(t => {
+      const rec = manager.agents.get(t.id);
+      let status = "pending";
+      if (completedIds.has(t.id)) status = "done";
+      else if (failedIds.has(t.id)) status = "failed";
+      else if (running.has(t.id)) status = "running";
+      else if (currentReady.includes(t.id)) status = "ready";
+
+      return {
+        id: t.id,
+        title: t.title,
+        status,
+        tool: rec?.tool,
+        startedAt: rec?.startedAt,
+        endedAt: rec?.endedAt,
+        waitingOn: deps.tasks[t.id]?.depends_on?.filter(d => !completedIds.has(d)) ?? []
+      };
+    });
+    if (!widget.isActive?.()) widget.start?.({ tasks });
+    else widget.update?.({ tasks });
+  };
+
+  const widgetInterval = setInterval(updateWidget, 1000);
+
   try {
+    updateWidget();
     while (completedIds.size < allTasks.length) {
       checkDagAbort(abortSignal, manager);
       allTasks = syncDbState(db, contextToolkit, allTasks, completedIds);
@@ -156,13 +184,17 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       if (readyIds.length === 0) continue;
 
       spawnReadyTasks(readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, sessionManager, settingsManager, agentDir, ctx, failedIds);
+      updateWidget();
       stallCount = 0;
       await Promise.race(running.values());
+      updateWidget();
       await new Promise(r => setImmediate(r));
     }
 
+    updateWidget();
     return { completed: [...completedIds], total: allTasks.length };
   } finally {
+    clearInterval(widgetInterval);
     widget?.stop?.();
     manager.abortAll();
     abortSignal?.removeEventListener("abort", onDagAbort);

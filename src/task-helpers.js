@@ -31,8 +31,8 @@ export const buildTaskPrompt = (taskId, planContent, contextToolkit) => {
 
 export const isTaskCompleteInDb = (taskId, contextToolkit) => {
   try {
-    const status = contextToolkit.db?.getTaskStatus?.(contextToolkit.mid, contextToolkit.sid, taskId);
-    return status?.status?.toLowerCase() === "complete";
+    const task = contextToolkit.db?.getTask?.(contextToolkit.mid, contextToolkit.sid, taskId);
+    return task?.status?.toLowerCase() === "complete";
   } catch { return false; }
 };
 
