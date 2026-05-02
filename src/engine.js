@@ -10,6 +10,35 @@ const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` 
 
 const waitToolRegistered = new WeakSet();
 
+let cachedCreateAgentSessionFn = null;
+let createAgentSessionImportFailed = false;
+
+const resolveCreateSessionFactory = async (ctx) => {
+  if (cachedCreateAgentSessionFn) {
+    return cachedCreateAgentSessionFn;
+  }
+
+  if (createAgentSessionImportFailed) {
+    return null;
+  }
+
+  try {
+    const sdkModule = await import("@gsd/pi-coding-agent");
+    if (typeof sdkModule?.createAgentSession === "function") {
+      cachedCreateAgentSessionFn = sdkModule.createAgentSession;
+      return cachedCreateAgentSessionFn;
+    }
+  } catch (err) {
+    createAgentSessionImportFailed = true;
+    ctx?.ui?.notify?.(`[DAG] Failed to import @gsd/pi-coding-agent.createAgentSession: ${err.message}`, "error");
+    return null;
+  }
+
+  createAgentSessionImportFailed = true;
+  ctx?.ui?.notify?.("[DAG] @gsd/pi-coding-agent.createAgentSession is unavailable", "error");
+  return null;
+};
+
 const isPrimaryExecuteTaskRule = (ruleName) => {
   if (typeof ruleName !== "string") return false;
   if (!ruleName.includes("executing → execute-task")) return false;
@@ -67,7 +96,7 @@ const emitDagDispatchLog = (ctx, payload) => {
   try { process.stderr.write(line); } catch {}
 };
 
-const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, pi) => {
+const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) => {
   const payload = payloadStore.get(_params.unitId);
   if (!payload) return { content: [{ type: "text", text: "No DAG payload found for this unitId." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
   payloadStore.delete(_params.unitId);
@@ -75,13 +104,27 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
   const { deps, allTasks, contextToolkit, db, dagWidget, dagTaskManagers: payloadDagTaskManagers } = payload;
   const effectiveDagTaskManagers = payloadDagTaskManagers || dagTaskManagers;
 
-  if (!pi?.createAgentSession) {
-    ctx?.ui?.notify?.("[DAG] pi.createAgentSession not available", "error");
-    return { content: [{ type: "text", text: "DAG initialization failed: pi.createAgentSession not available" }], details: { error: "no_create_agent_session" } };
+  const createSessionFactory = await resolveCreateSessionFactory(ctx);
+  if (!createSessionFactory) {
+    return {
+      content: [{ type: "text", text: "DAG initialization failed: createAgentSession unavailable" }],
+      details: { error: "no_create_agent_session" },
+    };
   }
 
   try {
-    const result = await dagExecutionLoop(deps, allTasks, contextToolkit, db, dagWidget, pi.createAgentSession, signal, _onUpdate, ctx, effectiveDagTaskManagers);
+    const result = await dagExecutionLoop(
+      deps,
+      allTasks,
+      contextToolkit,
+      db,
+      dagWidget,
+      createSessionFactory,
+      signal,
+      _onUpdate,
+      ctx,
+      effectiveDagTaskManagers,
+    );
     ctx?.ui?.notify?.(`[DAG] Successfully completed ${result.completed.length} tasks.`, "success");
     return { content: [{ type: "text", text: `All DAG tasks completed. Done: ${result.completed.length}/${result.total}.` }], details: { completed: result.completed, total: result.total } };
   } catch (err) {
@@ -98,7 +141,7 @@ const registerWaitTool = (pi, dagTaskManagers) => {
     label: "Wait for DAG Completion",
     description: "Blocks until all DAG background tasks complete.",
     parameters: { type: "object", properties: { unitId: { type: "string", description: "DAG execution unit ID from the dispatch prompt" } }, required: ["unitId"] },
-    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers, pi),
+    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers),
   });
 };
 
