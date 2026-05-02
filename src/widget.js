@@ -33,7 +33,7 @@ export function createDagStatusWidget(pi) {
         interval = null;
       }
       // Clear the widget area
-      pi.ui?.updateWidget?.("dag-status", { active: false, rendered: "" });
+      try { pi.ui?.updateWidget?.("dag-status", { active: false, rendered: "" }); } catch {}
     },
 
     isActive() {
@@ -54,17 +54,22 @@ export function createDagStatusWidget(pi) {
     for (const t of tasks) {
       const icon = t.status === "done"    ? "✓" :
                    t.status === "running" ? "▶" :
-                   t.status === "ready"   ? "○" : "·";
+                   t.status === "ready"   ? "○" :
+                   t.status === "failed"  ? "✗" : "·";
       const tool = t.tool ? ` (${t.tool})` : "";
-      const elapsed = t.elapsed ? ` [${formatElapsed(t.elapsed)}]` : "";
+      const elapsedMs = t.endedAt ? (t.endedAt - t.startedAt) :
+                        (t.startedAt ? Date.now() - t.startedAt : (t.elapsed ?? 0));
+      const elapsed = elapsedMs > 0 ? ` [${formatElapsed(elapsedMs)}]` : "";
       const deps = t.waitingOn?.length > 0 ? ` waiting [${t.waitingOn.join(",")}]` : "";
       body += `  ${icon} ${t.id}${tool}${elapsed}${deps}\n`;
     }
 
-    pi.ui?.updateWidget?.("dag-status", {
-      active: true,
-      rendered: body,
-    });
+    try {
+      pi.ui?.updateWidget?.("dag-status", {
+        active: true,
+        rendered: body,
+      });
+    } catch { /* UI not ready — non-critical */ }
   }
 }
 

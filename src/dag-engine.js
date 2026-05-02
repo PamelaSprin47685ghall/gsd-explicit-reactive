@@ -1,5 +1,25 @@
 import { computeReadySet } from "./deps.js";
 
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("Aborted"));
+
+    let onAbort;
+    const timer = setTimeout(() => {
+      if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    if (signal) {
+      onAbort = () => {
+        clearTimeout(timer);
+        reject(new Error("Aborted"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
+}
+
 /**
  * DAG execution state: tracks all task agent sessions and their statuses.
  */
@@ -28,8 +48,8 @@ export class DagTaskManager {
     const taskAbort = new AbortController();
     this.abortControllers.set(taskId, taskAbort);
 
-    const onParentAbort = () => { taskAbort.abort(); };
-    abortSignal?.addEventListener("abort", onParentAbort, { once: true });
+    // Placeholder entry so widget sees this task as running immediately
+    this.agents.set(taskId, { session: null, status: "starting", startedAt: Date.now(), unsubscribes: [] });
 
     let session;
     try {
@@ -43,15 +63,16 @@ export class DagTaskManager {
       });
       session = result.session;
     } catch (err) {
-      abortSignal?.removeEventListener("abort", onParentAbort);
       this.abortControllers.delete(taskId);
       throw new Error(`Failed to create agent session for ${taskId}: ${err.message}`);
     }
 
     const toolNames = session.getActiveToolNames?.() ?? [];
-    session.setActiveToolsByName?.(toolNames.filter(t => t !== "subagent"));
+    session.setActiveToolsByName?.(toolNames.filter(t => t !== "subagent" && t !== "_wait_for_dag_completion"));
 
-    const record = { session, status: "running", startedAt: Date.now(), unsubscribes: [] };
+    const placeholder = this.agents.get(taskId);
+    const actualStartedAt = placeholder?.startedAt ?? Date.now();
+    const record = { session, status: "running", startedAt: actualStartedAt, unsubscribes: [] };
     this.agents.set(taskId, record);
 
     // Subscribe to tool events and store the unsubscribe function (issue 11)
@@ -59,6 +80,9 @@ export class DagTaskManager {
       const unsub = session.subscribe(event => {
         if (event.type === "tool_execution_start") {
           pi.notifyTaskActivity?.(taskId, event.toolName, event.args);
+          record.tool = event.toolName;
+        } else if (event.type === "tool_execution_end") {
+          record.tool = null;
         }
       });
       record.unsubscribes.push(unsub);
@@ -66,23 +90,28 @@ export class DagTaskManager {
 
     // Forward task abort signal to session
     if (taskAbort.signal) {
-      const unsubAbort = () => {
-        if (taskAbort.signal.aborted) session.abort?.();
-      };
-      taskAbort.signal.addEventListener("abort", unsubAbort, { once: true });
-      record.unsubscribes.push(() =>
-        taskAbort.signal.removeEventListener("abort", unsubAbort)
-      );
+      const unsubAbort = () => { if (taskAbort.signal.aborted) session.abort?.(); };
+      if (taskAbort.signal.aborted) {
+        unsubAbort();
+      } else {
+        taskAbort.signal.addEventListener("abort", unsubAbort, { once: true });
+        record.unsubscribes.push(() =>
+          taskAbort.signal.removeEventListener("abort", unsubAbort)
+        );
+      }
     }
 
-    let currentPrompt = buildTaskPrompt(taskId, planContent, contextToolkit);
+    const basePrompt = buildTaskPrompt(taskId, planContent, contextToolkit);
+    let currentPrompt = basePrompt;
+    let retryCount = 0;
+    let emptyTurnCount = 0;
 
     try {
       while (true) {
         // Hard abort check: parent signal triggered
         if (abortSignal?.aborted || taskAbort.signal.aborted) {
           record.status = "aborted";
-          return;
+          throw new Error("Task aborted");
         }
 
         try {
@@ -96,14 +125,27 @@ export class DagTaskManager {
           currentPrompt =
             "You exited without calling `gsd_task_complete`. " +
             "You MUST finish the task and then call gsd_task_complete.";
+          emptyTurnCount++;
+          if (emptyTurnCount >= 10) {
+            throw new Error(`Agent stuck: ${emptyTurnCount} consecutive empty turns without completing task.`);
+          }
+          await new Promise(r => setTimeout(r, 0));
         } catch (err) {
-          currentPrompt =
-            `Previous attempt failed with error: ${err.message}. ` +
+          // Abort check: rethrow immediately without backoff delay
+          if (abortSignal?.aborted || taskAbort.signal.aborted) {
+            record.status = "aborted";
+            throw new Error("Task aborted");
+          }
+          currentPrompt = basePrompt +
+            `\n\n**SYSTEM ERROR ON PREVIOUS ATTEMPT**:\n${err.message}\n` +
             "Please try another approach. Do not give up.";
+          // Exponential backoff: 2s, 4s, 8s, 16s ... capped at 30s
+          const delay = Math.min(2000 * Math.pow(2, retryCount), 30000);
+          await sleep(delay, taskAbort.signal).catch(() => {});
+          retryCount++;
         }
       }
     } finally {
-      abortSignal?.removeEventListener("abort", onParentAbort);
       // Clean up all subscriptions (issue 11)
       for (const unsub of record.unsubscribes) {
         try { unsub(); } catch { /* ignore */ }
@@ -151,15 +193,10 @@ function buildTaskPrompt(taskId, planContent, contextToolkit) {
   sections.push(`## Slice goal\n${contextToolkit.sliceGoal}`);
   sections.push(`## Task plan\n${planContent}`);
 
-  if (contextToolkit.completedDeps?.length > 0) {
+  if (contextToolkit.dynamicCompletedDeps) {
+    sections.push(contextToolkit.dynamicCompletedDeps);
+  } else if (contextToolkit.completedDeps?.length > 0) {
     sections.push("## Completed dependencies\n" + contextToolkit.completedDeps.join("\n"));
-  }
-
-  if (contextToolkit.depsError) {
-    sections.push(
-      `## Error / Retry context\n` +
-      `Previous DEPS validation error:\n${JSON.stringify(contextToolkit.depsError, null, 2)}`
-    );
   }
 
   sections.push(
@@ -181,7 +218,7 @@ function buildTaskPrompt(taskId, planContent, contextToolkit) {
 function isTaskCompleteInDb(taskId, contextToolkit) {
   try {
     const task = contextToolkit.db?.getTask?.(contextToolkit.mid, contextToolkit.sid, taskId);
-    return task && ["complete", "done", "success"].includes(task.status?.toLowerCase());
+    return task && ["complete", "done", "success", "skipped"].includes(task.status?.toLowerCase());
   } catch {
     return false;
   }
@@ -206,13 +243,21 @@ function isTaskCompleteInDb(taskId, contextToolkit) {
  */
 export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, widget,
                                         createAgentSessionFn, abortSignal,
-                                        sessionManager, settingsManager, agentDir) {
+                                        sessionManager, settingsManager, agentDir, ctx) {
   if (!createAgentSessionFn) {
     throw new Error("createAgentSession function not provided to dagExecutionLoop");
   }
 
   const manager = new DagTaskManager();
-  pi._dagTaskManager = manager; // expose for session_shutdown (issue 9)
+
+  // Multi-tenant safe: register by sessionId, also expose as last-active for backward compat
+  const sessionId = ctx?.sessionManager?.getSessionId?.();
+  if (sessionId) {
+    pi._dagTaskManagers ??= new Map();
+    pi._dagTaskManagers.set(sessionId, manager);
+  }
+  pi._dagTaskManager = manager;
+
   const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
 
   /** @type {Set<string>} */
@@ -224,14 +269,29 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, w
 
   widget?.start?.({ tasks: allTasks.map(t => ({ id: t.id, title: t.title, status: t.status })) });
 
-  let stallCount = 0; // consecutive cycles with no progress (issue 13)
-  const MAX_STALL = 5;
+  let stallCount = 0; // consecutive cycles with no progress
 
-  while (completedIds.size < allTasks.length) {
+  // Single abort listener cascades to all taskAbort controllers via manager.abortAll
+  const onDagAbort = () => manager.abortAll();
+  if (abortSignal?.aborted) {
+    onDagAbort();
+  } else {
+    abortSignal?.addEventListener("abort", onDagAbort, { once: true });
+  }
+
+  try {
+    while (completedIds.size < allTasks.length) {
     // Check for external abort (issue 5)
     if (abortSignal?.aborted) {
       manager.abortAll();
       throw new Error("DAG execution aborted by parent signal.");
+    }
+
+    // Fail-fast: if any task suffered an infrastructure failure, abort the DAG
+    if (manager.failedTasks.size > 0) {
+      manager.abortAll();
+      const failed = [...manager.failedTasks];
+      throw new Error(`DAG infrastructure failure: task(s) [${failed.join(", ")}] cannot recover.`);
     }
 
     // Re-query DB to pick up task completions from background agents (issue 13)
@@ -239,11 +299,11 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, w
       try {
         const freshTasks = db.getSliceTasks(contextToolkit.mid, contextToolkit.sid);
         if (freshTasks?.length === allTasks.length) {
+          allTasks = freshTasks;
           const before = completedIds.size;
           for (const t of freshTasks) {
             if (doneStatuses.has(t.status?.toLowerCase()) && !completedIds.has(t.id)) {
               completedIds.add(t.id);
-              running.delete(t.id);
             }
           }
           if (completedIds.size > before) stallCount = 0;
@@ -251,9 +311,12 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, w
       } catch { /* ignore */ }
     }
 
-    // Compute ready set excluding already completed and already running
+    // Force-sync completedIds into allTasks via shallow copy (never mutate DB objects)
+    allTasks = allTasks.map(t => completedIds.has(t.id) ? { ...t, status: "complete" } : t);
+
+    // Compute ready set excluding already completed, running, and failed tasks
     const readyIds = computeReadySet(deps, allTasks)
-      .filter(id => !completedIds.has(id) && !running.has(id));
+      .filter(id => !completedIds.has(id) && !running.has(id) && !manager.failedTasks.has(id));
 
     // Update widget with current state
     widget?.update?.({
@@ -264,7 +327,11 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, w
         else if (manager.failedTasks.has(t.id)) status = "failed";
         else if (!readyIds.includes(t.id)) status = "blocked";
         const rec = manager.agents.get(t.id);
-        return { id: t.id, title: t.title, status, elapsed: rec?.startedAt ? Date.now() - rec.startedAt : 0 };
+        let waitingOn;
+        if (status === "blocked" && deps.tasks?.[t.id]?.depends_on) {
+          waitingOn = deps.tasks[t.id].depends_on.filter(d => !completedIds.has(d));
+        }
+        return { id: t.id, title: t.title, status, waitingOn, tool: rec?.tool, startedAt: rec?.startedAt ?? null, endedAt: rec?.endedAt ?? null, elapsed: rec?.startedAt ? Date.now() - rec.startedAt : 0 };
       }),
     });
 
@@ -275,17 +342,42 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, w
 
       const planContent = contextToolkit.taskPlans?.[taskId] ?? `# ${task.title}\n${task.description ?? ""}`;
 
-      const promise = manager.runTask(taskId, planContent, contextToolkit, pi,
+      // Dynamically read upstream SUMMARY.md for this task
+      let taskCtx = contextToolkit;
+      const depIds = deps.tasks[taskId]?.depends_on?.filter(d => completedIds.has(d)) ?? [];
+      if (depIds.length > 0) {
+        const summaries = [];
+        for (const depId of depIds) {
+          const depTask = contextToolkit.db?.getTask?.(contextToolkit.mid, contextToolkit.sid, depId);
+          if (depTask) {
+            const parts = [`### ${depId}`];
+            if (depTask.oneLiner) parts.push(`> ${depTask.oneLiner}`);
+            if (depTask.narrative) parts.push(depTask.narrative.slice(0, 1500));
+            summaries.push(parts.join("\n"));
+          } else {
+            summaries.push(`### ${depId}\nCompleted (no details in DB).`);
+          }
+        }
+        taskCtx = { ...contextToolkit, completedDeps: null, dynamicCompletedDeps: "## Upstream Task Results\n" + summaries.join("\n\n") };
+      }
+
+      const promise = manager.runTask(taskId, planContent, taskCtx, pi,
                                        createAgentSessionFn, sessionManager, settingsManager,
                                        agentDir, abortSignal)
         .then(() => {
           completedIds.add(taskId);
+          const rec = manager.agents.get(taskId);
+          if (rec) rec.endedAt = Date.now();
           running.delete(taskId);
           stallCount = 0;
         })
         .catch(err => {
-          console.error(`[DAG] Task ${taskId} failed despite retries: ${err.message}`);
-          manager.failedTasks.add(taskId);
+          if (!abortSignal?.aborted) {
+            ctx?.ui?.notify?.(`[DAG] Task ${taskId} error: ${err.message} — FAILED`, "error");
+            manager.failedTasks.add(taskId);
+          }
+          const rec = manager.agents.get(taskId);
+          if (rec) rec.endedAt = Date.now();
           running.delete(taskId);
         });
 
@@ -295,29 +387,13 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, w
     if (running.size === 0) {
       if (completedIds.size >= allTasks.length) break;
 
-      // If there are failed tasks that block downstream, throw instead of silent exit (issue 4)
-      if (manager.failedTasks.size > 0) {
-        const failed = [...manager.failedTasks];
-        const blocked = allTasks
-          .filter(t => !completedIds.has(t.id) && !failed.includes(t.id))
-          .map(t => t.id);
-        throw new Error(
-          `DAG execution failed: task(s) [${failed.join(", ")}] exhausted retries.` +
-          (blocked.length > 0 ? ` Downstream tasks [${blocked.join(", ")}] blocked.` : "")
-        );
-      }
-
-      // No tasks running, none failed, but tasks remain — could be race (issue 13)
+      // No tasks running, stall guard — indefinite retry, never throw on logic errors
       stallCount++;
-      if (stallCount >= MAX_STALL) {
+      if (stallCount % 10 === 0) {
         const stuck = allTasks.filter(t => !completedIds.has(t.id)).map(t => t.id);
-        throw new Error(
-          `DAG stalled: no forward progress after ${MAX_STALL} cycles. ` +
-          `Remaining tasks: [${stuck.join(", ")}].`
-        );
+        ctx?.ui?.notify?.(`[DAG] stalled (${stallCount} cycles), remaining: [${stuck.join(", ")}]`, "warning");
       }
-      // Yield and retry
-      await new Promise(r => setTimeout(r, 200));
+      await new Promise(r => setTimeout(r, 200 * Math.min(stallCount, 10)));
       continue;
     }
 
@@ -326,7 +402,12 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, pi, db, w
     await new Promise(r => setImmediate(r));
   }
 
-  widget?.stop?.();
-
   return { completed: [...completedIds], total: allTasks.length };
+} finally {
+  widget?.stop?.();
+  manager.abortAll();
+  abortSignal?.removeEventListener("abort", onDagAbort);
+  if (sessionId) pi._dagTaskManagers?.delete(sessionId);
+  if (pi._dagTaskManager === manager) pi._dagTaskManager = null;
+}
 }

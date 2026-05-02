@@ -17,6 +17,12 @@ export function loadDepsError(basePath, mid, sid) {
  */
 export function validateExplicitDeps(deps, sliceTasks) {
   const errors = [];
+
+  if (Array.isArray(deps.tasks)) {
+    errors.push("deps.tasks must be a plain object, not an array");
+    return { ok: false, errors };
+  }
+
   const taskIds = new Set(sliceTasks.map(t => t.id));
   const declaredIds = new Set(Object.keys(deps.tasks ?? {}));
 
@@ -37,7 +43,7 @@ export function validateExplicitDeps(deps, sliceTasks) {
       errors.push(`Unknown task declared in DEPS: ${id}`);
       continue;
     }
-    if (!Array.isArray(spec.depends_on)) {
+    if (!spec || !Array.isArray(spec.depends_on)) {
       errors.push(`Task ${id}: depends_on must be an array`);
       continue;
     }
@@ -114,9 +120,43 @@ export function computeReadySet(deps, allTasks) {
 }
 
 /**
+ * Calculate average concurrency width of a DAG.
+ * W_avg = N / L where N = total tasks, L = critical path length.
+ * A value close to 1 indicates a nearly serial chain.
+ */
+export function calculateDagMetrics(deps) {
+  const taskIds = Object.keys(deps.tasks ?? {});
+  const N = taskIds.length;
+  if (N === 0) return { totalTasks: 0, criticalPathLength: 0, averageWidth: 0 };
+
+  const memo = {};
+  function getDepth(id) {
+    if (memo[id]) return memo[id];
+    const depsList = deps.tasks[id]?.depends_on ?? [];
+    if (depsList.length === 0) {
+      memo[id] = 1;
+    } else {
+      let maxDep = 0;
+      for (const depId of depsList) {
+        maxDep = Math.max(maxDep, getDepth(depId));
+      }
+      memo[id] = maxDep + 1;
+    }
+    return memo[id];
+  }
+
+  let L = 0;
+  for (const id of taskIds) {
+    L = Math.max(L, getDepth(id));
+  }
+
+  return { totalTasks: N, criticalPathLength: L, averageWidth: N / L };
+}
+
+/**
  * Persist the latest DEPS validation error to DEPS-ERROR.json.
  */
-export function persistLatestError(basePath, mid, sid, errors, invalidDeps) {
+export function persistLatestError(basePath, mid, sid, errors, invalidDeps, ctx) {
   const dir = join(basePath, ".gsd", "milestones", mid, "slices", sid);
   const errorPath = join(dir, "DEPS-ERROR.json");
   const payload = {
@@ -127,19 +167,19 @@ export function persistLatestError(basePath, mid, sid, errors, invalidDeps) {
   try {
     writeFileSync(errorPath, JSON.stringify(payload, null, 2), "utf-8");
   } catch (err) {
-    console.error(`[DAG] Failed to write DEPS-ERROR.json: ${err.message}`);
+    ctx?.ui?.notify?.(`[DAG] Failed to write DEPS-ERROR.json: ${err.message}`, "error");
   }
 }
 
 /**
  * Clear DEPS-ERROR.json after successful validation.
  */
-export function clearLatestError(basePath, mid, sid) {
+export function clearLatestError(basePath, mid, sid, ctx) {
   const errorPath = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS-ERROR.json");
   try {
     if (existsSync(errorPath)) unlinkSync(errorPath);
   } catch (err) {
-    console.error(`[DAG] Failed to delete DEPS-ERROR.json: ${err.message}`);
+    ctx?.ui?.notify?.(`[DAG] Failed to delete DEPS-ERROR.json: ${err.message}`, "error");
   }
 }
 
