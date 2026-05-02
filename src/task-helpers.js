@@ -32,7 +32,8 @@ export const buildTaskPrompt = (taskId, planContent, contextToolkit) => {
 export const isTaskCompleteInDb = (taskId, contextToolkit) => {
   try {
     const task = contextToolkit.db?.getTask?.(contextToolkit.mid, contextToolkit.sid, taskId);
-    return task?.status?.toLowerCase() === "complete";
+    const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
+    return doneStatuses.has(task?.status?.toLowerCase());
   } catch { return false; }
 };
 
@@ -42,6 +43,24 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
     const options = {
       cwd: ctx?.cwd ?? process.cwd(),
     };
+
+    // Inherit tools if available
+    if (ctx?.tools) {
+      options.tools = ctx.tools;
+    }
+    
+    // Inherit active tool names to ensure subagent has same tools enabled
+    if (ctx?.session?.getActiveToolNames) {
+      options.extraActiveToolNames = ctx.session.getActiveToolNames();
+    }
+
+    // Inherit model and thinking level
+    if (ctx?.session?.getModel) {
+      options.model = ctx.session.getModel();
+    }
+    if (ctx?.session?.getThinkingLevel) {
+      options.thinkingLevel = ctx.session.getThinkingLevel();
+    }
     
     // Inherit resourceLoader if available (ensures extensions are loaded)
     if (ctx?.resourceLoader) {
@@ -98,6 +117,9 @@ export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, a
     }
 
     try {
+      if (retryCount > 0) {
+        ctx?.ui?.notify?.(`[${taskId}] Task agent retry (attempt ${retryCount + 1})`, "warning");
+      }
       await session.prompt(currentPrompt);
       if (isTaskCompleteInDb(taskId, contextToolkit)) {
         record.status = "completed";

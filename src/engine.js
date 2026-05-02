@@ -6,6 +6,8 @@ import { payloadStore } from "./payload-store.js";
 
 const width1Warned = new Map();
 
+const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` file in the same directory as `PLAN.md` to define task dependencies for parallel execution. Format:\n```json\n{\n  \"version\": 1,\n  \"tasks\": {\n    \"T01\": { \"depends_on\": [] },\n    \"T02\": { \"depends_on\": [\"T01\"] }\n  }\n}\n```";
+
 const disableOfficialRules = (rules) => {
   rules.filter(r => r.name?.includes("reactive-execute")).forEach(r => {
     r.match = async () => null;
@@ -17,11 +19,48 @@ const disableOfficialRules = (rules) => {
   });
 };
 
-const registerDagRule = (rules, core, autoDispatch, dagWidget, dagTaskManagers) => {
-  const dagRule = {
-    name: "executing → dag-execution",
-    match: async (ctx) => executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManagers),
-  };
+const disableRegistryRules = (rules) => {
+  rules.filter(r => r.name?.includes("reactive-execute")).forEach(r => {
+    r.where = async () => null;
+    r.name = `[DAG Disabled] ${r.name}`;
+  });
+  rules.filter(r => r.name?.includes("execute-task")).forEach(r => {
+    r.where = async () => null;
+    r.name = `[DAG Disabled] ${r.name}`;
+  });
+};
+
+const patchRegistryPlanRule = (rules) => {
+  const planRule = rules.find(r => r.name?.includes("plan-slice"));
+  if (planRule && !planRule._dagPatched) {
+    planRule._dagPatched = true;
+    const originalWhere = planRule.where;
+    planRule.where = async (ctx) => {
+      const result = await originalWhere(ctx);
+      if (result && result.prompt) {
+        result.prompt += DEPS_PROMPT_HINT;
+      }
+      return result;
+    };
+  }
+};
+
+const registerDagRule = (rules, dagRule) => {
+  if (rules._dagInjected) return;
+  
+  // Patch plan-slice to demand DEPS.json
+  const planRule = rules.find(r => r.name?.includes("plan-slice"));
+  if (planRule) {
+    const originalMatch = planRule.match;
+    planRule.match = async (ctx) => {
+      const result = await originalMatch(ctx);
+      if (result && result.prompt) {
+        result.prompt += DEPS_PROMPT_HINT;
+      }
+      return result;
+    };
+  }
+
   const reactiveIdx = rules.findIndex(r => r.name?.includes("reactive-execute"));
   if (reactiveIdx >= 0) {
     rules.splice(reactiveIdx, 0, dagRule);
@@ -32,7 +71,18 @@ const registerDagRule = (rules, core, autoDispatch, dagWidget, dagTaskManagers) 
   }
 };
 
-// Removed: loadPiCodingAgent - pi object provides createAgentSession directly
+const registerRegistryDagRule = (rules, dagRule, convertFn) => {
+  if (rules.some(r => r.name === dagRule.name)) return;
+  const unifiedDagRule = convertFn([dagRule])[0];
+  const reactiveIdx = rules.findIndex(r => r.name?.includes("reactive-execute"));
+  if (reactiveIdx >= 0) {
+    rules.splice(reactiveIdx, 0, unifiedDagRule);
+  } else {
+    const execIdx = rules.findIndex(r => r.name?.includes("executing"));
+    if (execIdx >= 0) rules.splice(execIdx, 0, unifiedDagRule);
+    else rules.push(unifiedDagRule);
+  }
+};
 
 const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, pi) => {
   const payload = payloadStore.get(_params.unitId);
@@ -49,6 +99,7 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
 
   try {
     const result = await dagExecutionLoop(deps, allTasks, contextToolkit, db, dagWidget, pi.createAgentSession, signal, _onUpdate, ctx, effectiveDagTaskManagers);
+    ctx?.ui?.notify?.(`[DAG] Successfully completed ${result.completed.length} tasks.`, "success");
     return { content: [{ type: "text", text: `All DAG tasks completed. Done: ${result.completed.length}/${result.total}.` }], details: { completed: result.completed, total: result.total } };
   } catch (err) {
     return { content: [{ type: "text", text: `DAG execution failed catastrophically: ${err.message}` }], details: { error: "dag_execution_failed", message: err.message } };
@@ -65,19 +116,50 @@ const registerWaitTool = (pi, dagTaskManagers) => {
   });
 };
 
-export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidget, dagTaskManagers) {
+export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTaskManagers) {
   const autoDispatch = core["auto-dispatch"];
   if (!autoDispatch?.DISPATCH_RULES) return;
   const rules = autoDispatch.DISPATCH_RULES;
-  if (rules._dagInjected) return;
-  rules._dagInjected = true;
-  disableOfficialRules(rules);
-  registerDagRule(rules, core, autoDispatch, dagWidget, dagTaskManagers);
-  registerWaitTool(pi, dagTaskManagers);
+  
+  const dagRule = {
+    name: "executing → dag-execution",
+    match: async (ctx) => executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers),
+  };
+
+  if (!rules._dagInjected) {
+    rules._dagInjected = true;
+    disableOfficialRules(rules);
+    registerDagRule(rules, dagRule);
+    registerWaitTool(pi, dagTaskManagers);
+  }
+
+  // Patch the Registry if it exists and is initialized
+  try {
+    const registryMod = core["rule-registry"];
+    if (registryMod && typeof registryMod.getRegistry === "function") {
+      const registry = registryMod.getRegistry();
+      if (registry && Array.isArray(registry.dispatchRules)) {
+        disableRegistryRules(registry.dispatchRules);
+        patchRegistryPlanRule(registry.dispatchRules);
+        
+        // Use a modified version of dagRule for the registry (if convertDispatchRules is available)
+        const registryDagRule = {
+          name: "executing → dag-execution",
+          match: async (ctx) => executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers),
+        };
+        registerRegistryDagRule(registry.dispatchRules, registryDagRule, registryMod.convertDispatchRules);
+      }
+    }
+  } catch (err) {
+    // Registry not initialized yet, will be initialized later with modified DISPATCH_RULES
+  }
 }
 
-async function executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManagers) {
+async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers) {
   if (ctx.state.phase !== "executing" || !ctx.state.activeSlice) return null;
+
+  const sessionId = ctx.sessionManager?.getSessionId?.();
+  const dagWidget = sessionId ? dagWidgets?.get(sessionId) : null;
 
   const mid = ctx.mid;
   const sid = ctx.state.activeSlice.id;
@@ -95,9 +177,11 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManager
     return backToPlanWithError(ctx, autoDispatch);
   }
 
-  const ready = computeReadySet(deps, tasks, new Set());
+  const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
+  const completedIds = new Set(tasks.filter(t => doneStatuses.has(t.status?.toLowerCase())).map(t => t.id));
+  const ready = computeReadySet(deps, tasks, completedIds);
+
   if (ready.length === 0) {
-    const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
     const allDone = tasks.every(t => doneStatuses.has(t.status?.toLowerCase()));
     if (allDone) return null;
     const incomplete = tasks.filter(t => !doneStatuses.has(t.status?.toLowerCase())).map(t => t.id);
@@ -115,6 +199,8 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManager
 
   clearLatestError(basePath, mid, sid, ctx);
   width1Warned.delete(key);
+
+  ctx?.ui?.notify?.(`[DAG] Starting parallel execution for ${ready.length} tasks: ${ready.join(", ")}`, "info");
 
   // Mark all ready tasks as in_progress so GSD state machine knows they're being executed
   for (const taskId of ready) {
@@ -183,7 +269,15 @@ async function backToPlanWithError(ctx, autoDispatch) {
   const originalPhase = ctx.state.phase;
   ctx.state.phase = "planning";
   try {
-    const planResult = await planRule.match(ctx);
+    const matchFn = planRule.match || planRule.where;
+    if (typeof matchFn !== "function") {
+      return {
+        action: "stop",
+        reason: `plan-slice rule found but no match/where function available.`,
+        level: "error",
+      };
+    }
+    const planResult = await matchFn(ctx);
     if (planResult?.prompt) {
       planResult.prompt = `**PLAN REJECTED: DEPS.json ERROR** 🚨\nYou MUST rewrite the DEPS.json file correctly.\n${errorBlock}\n\n---\n\n${planResult.prompt}`;
     }
@@ -192,4 +286,3 @@ async function backToPlanWithError(ctx, autoDispatch) {
     ctx.state.phase = originalPhase;
   }
 }
-

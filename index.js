@@ -28,7 +28,7 @@ export default async function explicitReactivePlugin(pi) {
         ctx.ui?.notify?.("[DAG] GSD core modules not found. Plugin disabled.", "warning");
         return;
       }
-      injectExplicitDagEngine(core, pi, ctx, dagWidget, dagTaskManagers);
+      injectExplicitDagEngine(core, pi, ctx, dagWidgets, dagTaskManagers);
     } catch (err) {
       ctx.ui?.notify?.(`[DAG] Initialization failed: ${err.message}`, "error");
     }

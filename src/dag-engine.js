@@ -200,6 +200,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       stallCount = await handleStall(readyIds, running, stallCount, allTasks, completedIds, ctx);
       if (readyIds.length === 0) continue;
 
+      ctx?.ui?.notify?.(`[DAG] Spawning tasks: ${readyIds.join(", ")}`, "info");
       spawnReadyTasks(readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx, failedIds);
       updateWidget();
       stallCount = 0;

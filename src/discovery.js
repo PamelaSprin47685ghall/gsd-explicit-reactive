@@ -3,7 +3,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const CORE_MODULES = [
-  "auto-dispatch", "gsd-db", "auto-prompts", "reactive-graph"
+  "auto-dispatch", "gsd-db", "auto-prompts", "reactive-graph", "rule-registry"
 ];
 
 export async function loadGsdCore() {
