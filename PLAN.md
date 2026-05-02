@@ -4,7 +4,7 @@
 
 这是一个*适配层*，不是一个独立运行平台。
 
-核心目标是把 GSD slice 内 Task 的并行关系从隐式 IO 推导替换为**显式、可审计、可修复的依赖声明**。执行运行时仍借道 GSD dispatch 生命周期的接缝，但不用官方 `reactive-execute`，不用官方 `execute-task`，不用官方 subagent，不依赖 `pi-subagents`。
+核心目标是把 GSD slice 内 Task 的并行关系从隐式 IO 推导替换为**显式、可审计、可修复的依赖声明**。执行运行时仍借道 GSD dispatch 生命周期的接缝，但不用官方 `reactive-execute`，不用官方 `execute-task`，不依赖 `pi-subagents`。
 
 本方案只写 GSD dispatch 规则、验证依赖文件、管理 task agent 生命周期。不写完整 AgentSession 平台，不写 Dashboard 引擎，不写自定义 agent 类型系统。
 
@@ -82,7 +82,7 @@
 | 执行硬约束注入 | 禁止串行 fallback；必须调用 `gsd_task_complete`；未完成时不准退出（追问）。只以 DEPS.json 显式依赖为准。不依赖 IO 冲突过滤。 |
 | 失败任务策略 | 失败 task 无限 retry，不兜底。下游依赖它的 task 不启动。已成功 task 保持完成。 |
 | Task 退出策略 | 如果 agent turn 结束但未调用 `gsd_task_complete`，对其再次 `prompt()` 要求继续。不允许提前退出。 |
-| 工具权限 | 全工具继承。但插件激活时全局禁用 subagent。 |
+| 工具权限 | 全工具继承，包括 subagent（用户自由使用）。 |
 | 运行时基底 | 不依赖 `pi-subagents` 包。不复制其内部代码。只参考其架构语义：后台 agent 生命周期、状态聚合、tool activity 事件、伴随 widget。 |
 | GSD 接入方式 | 自定义 dispatch unit `dag-execution`，主会话调用等待工具挂起，后台并行跑 task。 |
 | 文档更新顺序 | 写出最终代码后更新 方案.md 以外文档（README 等）。 |
@@ -97,7 +97,7 @@ src/
   discovery.js            ← 动态加载 GSD 核心模块
   deps.js                 ← DEPS schema 验证 + 环检测 + 错误诊断 + 最新错误持久化
   dag-engine.js           ← DAG 调度核心：ready set + task agent 管理 + 状态聚合
-  engine.js               ← dispatch rule 注册 (dag-execution) + 拦截宽度为 1 + subagent 禁用
+  engine.js               ← dispatch rule 注册 (dag-execution) + 拦截宽度为 1
   widget.js               ← 伴随 widget（不覆盖 gsd-progress）
 ```
 
@@ -280,13 +280,8 @@ class DagTaskManager {
   async runTask(taskId, planContent, contextToolkit, pi) {
     const { session } = await createAgentSession({
       cwd: pi.cwd,
-      tools: pi.tools, // 全工具继承
+      tools: pi.tools, // 全工具继承，包括 subagent
     });
-
-    // 禁用 subagent
-    session.setActiveToolsByName(
-      session.getActiveToolNames().filter(t => t !== "subagent")
-    );
 
     const record = { session, status: "running", startedAt: Date.now() };
     this.agents.set(taskId, record);
@@ -401,20 +396,11 @@ const et = rules.find(r => r.name.includes("execute-task"));
 if (et) et.match = async () => null;
 ```
 
-### 8.4 subagent 全局禁用
+### 8.4 subagent 禁用已移除
 
-```js
-// 在 session_start hook 中，从所有 dispatch rule 的 prompt 注入
-for (const rule of allRules) {
-  const orig = rule.match;
-  rule.match = async (ctx) => {
-    const result = await orig(ctx);
-    if (result?.prompt)
-      result.prompt = "The subagent tool is globally disabled.\n" + result.prompt;
-    return result;
-  };
-}
-```
+插件不再全局禁用 subagent。task agent 继承全工具列表，用户可以自由决定是否使用 subagent。
+
+在 `session_start` hook 中，task agent 会话的可用工具只过滤内部工具 `_wait_for_dag_completion`，subagent 保留在工具列表中供自由使用。
 
 ---
 
@@ -443,7 +429,7 @@ for (const rule of allRules) {
 - This task runs in parallel with other tasks. Do NOT depend on other running tasks.
 - You MUST call the `gsd_task_complete` tool after finishing this task.
 - You MUST NOT exit without calling `gsd_task_complete`.
-- Do NOT use `subagent` — it is globally disabled.
+- Use subagent at your discretion as needed.
 - Do NOT rely on file IO conflict analysis. Dependencies are explicitly declared in DEPS.json.
 - If you need to read/write files, just do it. Finish the task and call gsd_task_complete.
 ```
@@ -530,7 +516,7 @@ DAG: S01 ready 3 tasks ──────
 
 不依赖官方 `reactive-execute`。
 不依赖官方 `execute-task`。
-不依赖官方 subagent。
+不强制禁用 subagent（用户可自由使用）。
 不依赖 `pi-subagents`。
 不修改 `../gsd-2`。
 不覆盖 `gsd-progress` widget。

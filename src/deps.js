@@ -1,9 +1,6 @@
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
-/**
- * Load DEPS-ERROR.json for a slice, returning null when absent.
- */
 export function loadDepsError(basePath, mid, sid) {
   const path = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS-ERROR.json");
   if (!existsSync(path)) return null;
@@ -11,33 +8,22 @@ export function loadDepsError(basePath, mid, sid) {
   catch { return null; }
 }
 
-/**
- * Validate DEPS.json structure and semantics.
- * Returns { ok, errors[] }
- */
-export function validateExplicitDeps(deps, sliceTasks) {
-  const errors = [];
-
+const validateBasicStructure = (deps, errors) => {
   if (Array.isArray(deps.tasks)) {
     errors.push("deps.tasks must be a plain object, not an array");
-    return { ok: false, errors };
+    return false;
   }
+  if (deps.version !== 1) errors.push(`Unsupported DEPS version: ${deps.version}`);
+  return true;
+};
 
-  const taskIds = new Set(sliceTasks.map(t => t.id));
-  const declaredIds = new Set(Object.keys(deps.tasks ?? {}));
-
-  if (deps.version !== 1) {
-    errors.push(`Unsupported DEPS version: ${deps.version}`);
-  }
-
-  // Every slice task must be declared
+const validateTaskDeclarations = (taskIds, declaredIds, errors) => {
   for (const id of taskIds) {
-    if (!declaredIds.has(id)) {
-      errors.push(`Missing task in DEPS.tasks: ${id}`);
-    }
+    if (!declaredIds.has(id)) errors.push(`Missing task in DEPS.tasks: ${id}`);
   }
+};
 
-  // Every declared task must be valid
+const validateTaskDependencies = (deps, taskIds, declaredIds, errors) => {
   for (const [id, spec] of Object.entries(deps.tasks ?? {})) {
     if (!taskIds.has(id)) {
       errors.push(`Unknown task declared in DEPS: ${id}`);
@@ -47,62 +33,69 @@ export function validateExplicitDeps(deps, sliceTasks) {
       errors.push(`Task ${id}: depends_on must be an array`);
       continue;
     }
+    const seenDeps = new Set();
     for (const dep of spec.depends_on) {
-      if (!declaredIds.has(dep)) {
-        errors.push(`Task ${id} depends on unknown task: ${dep}`);
+      if (typeof dep !== "string") {
+        errors.push(`Task ${id}: depends_on must contain only strings, got ${typeof dep}`);
+        continue;
       }
-      if (dep === id) {
-        errors.push(`Task ${id}: self-dependency`);
+      if (seenDeps.has(dep)) {
+        errors.push(`Task ${id}: duplicate dependency ${dep}`);
+        continue;
       }
+      seenDeps.add(dep);
+      if (!declaredIds.has(dep)) errors.push(`Task ${id} depends on unknown task: ${dep}`);
+      if (dep === id) errors.push(`Task ${id}: self-dependency`);
     }
   }
+};
 
-  // Cycle detection (DFS)
+export function validateExplicitDeps(deps, sliceTasks) {
+  const errors = [];
+  if (!validateBasicStructure(deps, errors)) return { ok: false, errors };
+
+  const taskIds = new Set(sliceTasks.map(t => t.id));
+  const declaredIds = new Set(Object.keys(deps.tasks ?? {}));
+
+  validateTaskDeclarations(taskIds, declaredIds, errors);
+  validateTaskDependencies(deps, taskIds, declaredIds, errors);
+
   const cycle = findCycle(deps.tasks ?? {});
-  if (cycle.length > 0) {
-    errors.push(`Cycle detected in DEPS: ${cycle.join(" → ")}`);
-  }
+  if (cycle.length > 0) errors.push(`Cycle detected in DEPS: ${cycle.join(" → ")}`);
 
   return { ok: errors.length === 0, errors };
 }
 
-/**
- * DFS cycle detection using path.indexOf for exact cycle extraction.
- * Returns the precise cycle path (e.g. ["T02","T03","T04","T02"]) if found, else [].
- */
 function findCycle(tasks) {
-  const visited = {};      // 'visiting' | 'done'
+  const visited = {};
   const path = [];
 
   function dfs(id) {
     if (visited[id] === "done") return null;
     if (visited[id] === "visiting") {
-      const cycleStartIdx = path.indexOf(id);
-      if (cycleStartIdx === -1) return null;
-      return [...path.slice(cycleStartIdx), id];
+      const cycleStart = path.indexOf(id);
+      return path.slice(cycleStart).concat(id);
     }
     visited[id] = "visiting";
     path.push(id);
     for (const dep of tasks[id]?.depends_on ?? []) {
-      const result = dfs(dep);
-      if (result) return result;
+      const cycle = dfs(dep);
+      if (cycle) return cycle;
     }
-    visited[id] = "done";
     path.pop();
+    visited[id] = "done";
     return null;
   }
 
   for (const id of Object.keys(tasks)) {
-    const result = dfs(id);
-    if (result) return result;
+    if (!visited[id]) {
+      const cycle = dfs(id);
+      if (cycle) return cycle;
+    }
   }
   return [];
 }
 
-/**
- * Compute the set of ready-to-execute tasks given DEPS and current statuses.
- * A task is ready when all its dependencies are in a done status.
- */
 export function computeReadySet(deps, allTasks) {
   const statuses = new Map(allTasks.map(t => [t.id, t.status]));
   const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
@@ -119,19 +112,19 @@ export function computeReadySet(deps, allTasks) {
     .map(([id]) => id);
 }
 
-/**
- * Calculate average concurrency width of a DAG.
- * W_avg = N / L where N = total tasks, L = critical path length.
- * A value close to 1 indicates a nearly serial chain.
- */
 export function calculateDagMetrics(deps) {
   const taskIds = Object.keys(deps.tasks ?? {});
   const N = taskIds.length;
   if (N === 0) return { totalTasks: 0, criticalPathLength: 0, averageWidth: 0 };
 
   const memo = {};
+  const visiting = new Set();
+  
   function getDepth(id) {
-    if (memo[id]) return memo[id];
+    if (memo[id] !== undefined) return memo[id];
+    if (visiting.has(id)) return 0;
+    
+    visiting.add(id);
     const depsList = deps.tasks[id]?.depends_on ?? [];
     if (depsList.length === 0) {
       memo[id] = 1;
@@ -142,23 +135,16 @@ export function calculateDagMetrics(deps) {
       }
       memo[id] = maxDep + 1;
     }
+    visiting.delete(id);
     return memo[id];
   }
 
-  let L = 0;
-  for (const id of taskIds) {
-    L = Math.max(L, getDepth(id));
-  }
-
+  const L = Math.max(...taskIds.map(getDepth));
   return { totalTasks: N, criticalPathLength: L, averageWidth: N / L };
 }
 
-/**
- * Persist the latest DEPS validation error to DEPS-ERROR.json.
- */
 export function persistLatestError(basePath, mid, sid, errors, invalidDeps, ctx) {
-  const dir = join(basePath, ".gsd", "milestones", mid, "slices", sid);
-  const errorPath = join(dir, "DEPS-ERROR.json");
+  const errorPath = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS-ERROR.json");
   const payload = {
     errors: Array.isArray(errors) ? errors : [errors],
     invalidDeps,
@@ -171,9 +157,6 @@ export function persistLatestError(basePath, mid, sid, errors, invalidDeps, ctx)
   }
 }
 
-/**
- * Clear DEPS-ERROR.json after successful validation.
- */
 export function clearLatestError(basePath, mid, sid, ctx) {
   const errorPath = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS-ERROR.json");
   try {
@@ -183,10 +166,6 @@ export function clearLatestError(basePath, mid, sid, ctx) {
   }
 }
 
-/**
- * Load DEPS.json, parse it, and validate.
- * Returns { deps, error, errors } where error is a joined string, errors is the raw array.
- */
 export function loadAndValidateDeps(basePath, mid, sid, sliceTasks) {
   const depsPath = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS.json");
   if (!existsSync(depsPath)) {
@@ -213,11 +192,4 @@ export function loadAndValidateDeps(basePath, mid, sid, sliceTasks) {
   }
 
   return { deps, error: null, errors: null };
-}
-
-/**
- * Build a hash of task titles keyed by ID for quick lookup.
- */
-export function buildTaskTitleMap(tasks) {
-  return Object.fromEntries(tasks.map(t => [t.id, t.title]));
 }

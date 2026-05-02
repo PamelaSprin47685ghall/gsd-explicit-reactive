@@ -3,34 +3,53 @@ import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
 
 export default async function explicitReactivePlugin(pi) {
-  // Create and start the DAG status widget once
-  const dagWidget = createDagStatusWidget(pi);
-  pi._dagWidget = dagWidget;
+  // Module-level state (not stored on pi)
+  const dagWidgets = new Map(); // sessionId -> widget
+  const dagTaskManagers = new Map(); // sessionId -> DagTaskManager
 
-  // The DagTaskManager is stored here for session_shutdown cleanup.
-  // injectExplicitDagEngine will set pi._dagTaskManager when DAG executes.
-  pi._dagTaskManager = null;
+  pi.on("session_start", async (_event, ctx) => {
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    
+    // Create widget per session
+    let dagWidget = null;
+    if (sessionId) {
+      if (!dagWidgets.has(sessionId)) {
+        dagWidget = createDagStatusWidget(ctx);
+        dagWidgets.set(sessionId, dagWidget);
+      } else {
+        dagWidget = dagWidgets.get(sessionId);
+      }
+    }
 
-  pi.on("session_start", async (_event, captureCtx) => {
-    // injectExplicitDagEngine is idempotent via rules._dagInjected guard,
-    // so no module-level engineInjected flag is needed.
+    // injectExplicitDagEngine is idempotent via rules._dagInjected guard
     try {
       const core = await loadGsdCore();
       if (!core) {
-        pi.ui?.notify?.("[DAG] GSD core modules not found. Plugin disabled.", "warning");
+        ctx.ui?.notify?.("[DAG] GSD core modules not found. Plugin disabled.", "warning");
         return;
       }
-      injectExplicitDagEngine(core, pi);
+      injectExplicitDagEngine(core, pi, ctx, dagWidget, dagTaskManagers);
     } catch (err) {
-      pi.ui?.notify?.(`[DAG] Initialization failed: ${err.message}`, "error");
+      ctx.ui?.notify?.(`[DAG] Initialization failed: ${err.message}`, "error");
     }
   });
 
   // Issue 9: Clean up background agents on session shutdown
-  pi.on("session_shutdown", async () => {
-    if (pi._dagTaskManager) {
-      pi._dagTaskManager.abortAll();
-      pi._dagTaskManager = null;
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const sessionId = ctx.sessionManager?.getSessionId?.();
+    if (sessionId) {
+      // Clean up task manager
+      if (dagTaskManagers.has(sessionId)) {
+        const manager = dagTaskManagers.get(sessionId);
+        manager.abortAll();
+        dagTaskManagers.delete(sessionId);
+      }
+      // Clean up widget
+      if (dagWidgets.has(sessionId)) {
+        const widget = dagWidgets.get(sessionId);
+        widget.stop?.();
+        dagWidgets.delete(sessionId);
+      }
     }
   });
 }

@@ -24,11 +24,18 @@ export async function loadGsdCore() {
     if (!isComplete) continue;
 
     const loaded = {};
-    for (const mod of CORE_MODULES) {
-      const modPath = pathToFileURL(path.join(dir, `${mod}.js`)).href;
-      loaded[mod] = await import(modPath);
+    try {
+      for (const mod of CORE_MODULES) {
+        const modPath = pathToFileURL(path.join(dir, `${mod}.js`)).href;
+        loaded[mod] = await import(modPath);
+      }
+      return loaded;
+    } catch (err) {
+      // Module exists but failed to load (syntax error, etc.)
+      // Continue to next candidate directory
+      console.error(`[DAG] Failed to load GSD core from ${dir}: ${err.message}`);
+      continue;
     }
-    return loaded;
   }
 
   return null;

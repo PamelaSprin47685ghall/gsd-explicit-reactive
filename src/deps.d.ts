@@ -18,6 +18,12 @@ export interface DepsError {
   attemptedAt: string;
 }
 
+export interface DagMetrics {
+  totalTasks: number;
+  criticalPathLength: number;
+  averageWidth: number;
+}
+
 /**
  * Load DEPS-ERROR.json for a slice, returning null when absent.
  */
@@ -34,6 +40,12 @@ export function validateExplicitDeps(deps: DepsSpec, sliceTasks: any[]): Validat
 export function computeReadySet(deps: DepsSpec, allTasks: any[]): string[];
 
 /**
+ * Calculate average concurrency width of a DAG.
+ * W_avg = N / L where N = total tasks, L = critical path length.
+ */
+export function calculateDagMetrics(deps: DepsSpec): DagMetrics;
+
+/**
  * Persist the latest DEPS validation error to DEPS-ERROR.json.
  */
 export function persistLatestError(
@@ -41,13 +53,19 @@ export function persistLatestError(
   mid: string,
   sid: string,
   errors: string | string[],
-  invalidDeps: any
+  invalidDeps: any,
+  ctx?: any
 ): void;
 
 /**
  * Clear DEPS-ERROR.json after successful validation.
  */
-export function clearLatestError(basePath: string, mid: string, sid: string): void;
+export function clearLatestError(
+  basePath: string,
+  mid: string,
+  sid: string,
+  ctx?: any
+): void;
 
 /**
  * Load DEPS.json, parse it, and validate.
@@ -57,9 +75,8 @@ export function loadAndValidateDeps(
   mid: string,
   sid: string,
   sliceTasks: any[]
-): { deps: DepsSpec | null; error: string | null };
-
-/**
- * Build a hash of task titles keyed by ID for quick lookup.
- */
-export function buildTaskTitleMap(tasks: any[]): Record<string, string>;
+): {
+  deps: DepsSpec | null;
+  error: string | null;
+  errors: string[] | null;
+};

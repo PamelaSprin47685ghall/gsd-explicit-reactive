@@ -3,7 +3,7 @@
  * Does NOT override the official gsd-progress widget.
  * Only renders when DAG is active.
  */
-export function createDagStatusWidget(pi) {
+export function createDagStatusWidget(ctx) {
   let active = false;
   let tasks = [];       // { id, title, status, tool, elapsed }
   let interval = null;
@@ -33,7 +33,7 @@ export function createDagStatusWidget(pi) {
         interval = null;
       }
       // Clear the widget area
-      try { pi.ui?.updateWidget?.("dag-status", { active: false, rendered: "" }); } catch {}
+      try { ctx.ui?.setWidget?.("dag-status", undefined); } catch {}
     },
 
     isActive() {
@@ -49,7 +49,7 @@ export function createDagStatusWidget(pi) {
     const ready = tasks.filter(t => t.status === "ready").length;
     const total = tasks.length;
 
-    let body = `DAG: active — ${done}/${total} done, ${running} running, ${ready} ready\n`;
+    const lines = [`DAG: active — ${done}/${total} done, ${running} running, ${ready} ready`];
 
     for (const t of tasks) {
       const icon = t.status === "done"    ? "✓" :
@@ -61,14 +61,11 @@ export function createDagStatusWidget(pi) {
                         (t.startedAt ? Date.now() - t.startedAt : (t.elapsed ?? 0));
       const elapsed = elapsedMs > 0 ? ` [${formatElapsed(elapsedMs)}]` : "";
       const deps = t.waitingOn?.length > 0 ? ` waiting [${t.waitingOn.join(",")}]` : "";
-      body += `  ${icon} ${t.id}${tool}${elapsed}${deps}\n`;
+      lines.push(`  ${icon} ${t.id}${tool}${elapsed}${deps}`);
     }
 
     try {
-      pi.ui?.updateWidget?.("dag-status", {
-        active: true,
-        rendered: body,
-      });
+      ctx.ui?.setWidget?.("dag-status", lines, { position: "above" });
     } catch { /* UI not ready — non-critical */ }
   }
 }
