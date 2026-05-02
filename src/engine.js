@@ -22,40 +22,33 @@ const registerDagRule = (rules, core, autoDispatch, dagWidget, dagTaskManagers) 
     name: "executing → dag-execution",
     match: async (ctx) => executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManagers),
   };
-  const execIdx = rules.findIndex(r => r.name?.includes("executing →") || r.name?.includes("executing"));
-  if (execIdx >= 0) rules.splice(execIdx, 0, dagRule);
-  else rules.push(dagRule);
+  const reactiveIdx = rules.findIndex(r => r.name?.includes("reactive-execute"));
+  if (reactiveIdx >= 0) {
+    rules.splice(reactiveIdx, 0, dagRule);
+  } else {
+    const execIdx = rules.findIndex(r => r.name?.includes("executing →") || r.name?.includes("executing"));
+    if (execIdx >= 0) rules.splice(execIdx, 0, dagRule);
+    else rules.push(dagRule);
+  }
 };
 
-const loadPiCodingAgent = async (ctx) => {
-  const piCodingAgent = await import("@gsd/pi-coding-agent");
-  const agentDir = piCodingAgent.getAgentDir();
-  const cwd = ctx.cwd ?? process.cwd();
-  return {
-    createAgentSessionFn: piCodingAgent.createAgentSession,
-    sessionManager: piCodingAgent.SessionManager.inMemory(cwd),
-    settingsManager: piCodingAgent.SettingsManager.create(cwd, agentDir),
-    agentDir,
-  };
-};
+// Removed: loadPiCodingAgent - pi object provides createAgentSession directly
 
-const executeDagTool = async (_params, signal, ctx, dagTaskManagers) => {
+const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, pi) => {
   const payload = payloadStore.get(_params.unitId);
   if (!payload) return { content: [{ type: "text", text: "No DAG payload found for this unitId." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
   payloadStore.delete(_params.unitId);
 
-  const { deps, allTasks, contextToolkit, db, dagWidget } = payload;
+  const { deps, allTasks, contextToolkit, db, dagWidget, dagTaskManagers: payloadDagTaskManagers } = payload;
+  const effectiveDagTaskManagers = payloadDagTaskManagers || dagTaskManagers;
 
-  let agentConfig;
-  try {
-    agentConfig = await loadPiCodingAgent(ctx);
-  } catch (err) {
-    ctx?.ui?.notify?.(`[DAG] Failed to load pi-coding-agent: ${err.message}`, "error");
-    return { content: [{ type: "text", text: `DAG initialization failed: ${err.message}` }], details: { error: "pi_coding_agent_load_failed", message: err.message } };
+  if (!pi?.createAgentSession) {
+    ctx?.ui?.notify?.("[DAG] pi.createAgentSession not available", "error");
+    return { content: [{ type: "text", text: "DAG initialization failed: pi.createAgentSession not available" }], details: { error: "no_create_agent_session" } };
   }
 
   try {
-    const result = await dagExecutionLoop(deps, allTasks, contextToolkit, db, dagWidget, agentConfig.createAgentSessionFn, signal, agentConfig.sessionManager, agentConfig.settingsManager, agentConfig.agentDir, ctx, dagTaskManagers);
+    const result = await dagExecutionLoop(deps, allTasks, contextToolkit, db, dagWidget, pi.createAgentSession, signal, _onUpdate, ctx, effectiveDagTaskManagers);
     return { content: [{ type: "text", text: `All DAG tasks completed. Done: ${result.completed.length}/${result.total}.` }], details: { completed: result.completed, total: result.total } };
   } catch (err) {
     return { content: [{ type: "text", text: `DAG execution failed catastrophically: ${err.message}` }], details: { error: "dag_execution_failed", message: err.message } };
@@ -68,7 +61,7 @@ const registerWaitTool = (pi, dagTaskManagers) => {
     label: "Wait for DAG Completion",
     description: "Blocks until all DAG background tasks complete.",
     parameters: { type: "object", properties: { unitId: { type: "string", description: "DAG execution unit ID from the dispatch prompt" } }, required: ["unitId"] },
-    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, ctx, dagTaskManagers),
+    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers, pi),
   });
 };
 
@@ -84,7 +77,7 @@ export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidget, dagTask
 }
 
 async function executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManagers) {
-  if (ctx.state.phase !== "executing" || !ctx.state.activeTask || !ctx.state.activeSlice) return null;
+  if (ctx.state.phase !== "executing" || !ctx.state.activeSlice) return null;
 
   const mid = ctx.mid;
   const sid = ctx.state.activeSlice.id;
@@ -123,6 +116,15 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManager
   clearLatestError(basePath, mid, sid, ctx);
   width1Warned.delete(key);
 
+  // Mark all ready tasks as in_progress so GSD state machine knows they're being executed
+  for (const taskId of ready) {
+    try {
+      db.updateTaskStatus?.(mid, sid, taskId, "in_progress");
+    } catch (err) {
+      ctx?.ui?.notify?.(`[DAG] Failed to mark ${taskId} as in_progress: ${err.message}`, "warning");
+    }
+  }
+
   const readMilestoneContext = (basePath, mid) => {
     const path = join(basePath, ".gsd", "milestones", mid, `${mid}-CONTEXT.md`);
     try { if (existsSync(path)) return readFileSync(path, "utf-8").slice(0, 2000); } catch {}
@@ -146,7 +148,8 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManager
     db,
   };
 
-  const unitId = `${mid}/${sid}/${ctx.state.activeTask.id}`;
+  const batchSuffix = ready.join(",");
+  const unitId = `${mid}/${sid}/dag+${batchSuffix}`;
   payloadStore.set(unitId, { deps, allTasks: tasks, contextToolkit, db, dagWidget, dagTaskManagers }, 600000);
 
   return {

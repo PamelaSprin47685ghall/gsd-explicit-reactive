@@ -8,14 +8,14 @@ export class DagTaskManager {
     this.abortControllers = new Map();
   }
 
-  async runTask(taskId, planContent, contextToolkit, createAgentSessionFn, sessionManager, settingsManager, agentDir, abortSignal, ctx) {
+  async runTask(taskId, planContent, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx) {
     if (!createAgentSessionFn) throw new Error("createAgentSession function not provided to runTask");
 
     const taskAbort = new AbortController();
     this.abortControllers.set(taskId, taskAbort);
     this.agents.set(taskId, { session: null, status: "starting", startedAt: Date.now(), unsubscribes: [] });
 
-    const session = await createTaskSession(taskId, ctx, createAgentSessionFn, sessionManager, settingsManager)
+    const session = await createTaskSession(taskId, ctx, createAgentSessionFn)
       .catch(err => { this.abortControllers.delete(taskId); throw err; });
 
     session.setActiveToolsByName?.((session.getActiveToolNames?.() ?? []).filter(t => t !== "_wait_for_dag_completion"));
@@ -25,7 +25,14 @@ export class DagTaskManager {
 
     if (session.subscribe) {
       record.unsubscribes.push(session.subscribe(event => {
-        record.tool = event.type === "tool_execution_start" ? event.toolName : null;
+        if (event.type === "tool_execution_start") {
+          record.tool = event.toolName;
+        } else if (event.type === "assistant_message" && onUpdate) {
+          const content = event.content?.[0];
+          if (content?.type === "text" && content.text) {
+            onUpdate({ type: "text", text: `[${taskId}] ${content.text}` });
+          }
+        }
       }));
     }
 
@@ -69,14 +76,14 @@ const syncDbState = (db, contextToolkit, allTasks, completedIds) => {
   } catch { return allTasks; }
 };
 
-const spawnReadyTasks = (readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, sessionManager, settingsManager, agentDir, ctx, failedIds) => {
+const spawnReadyTasks = (readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx, failedIds) => {
   for (const taskId of readyIds) {
     const planContent = contextToolkit.taskPlans?.[taskId] ?? `No plan found for ${taskId}`;
     const depIds = deps.tasks[taskId]?.depends_on ?? [];
     const completedDepTitles = depIds.map(d => allTasks.find(t => t.id === d)?.title ?? d).filter(Boolean);
     const dynamicToolkit = { ...contextToolkit, dynamicCompletedDeps: completedDepTitles.length > 0 ? `## Completed dependencies\n${completedDepTitles.map(t => `- ${t}`).join("\n")}` : undefined };
 
-    const promise = manager.runTask(taskId, planContent, dynamicToolkit, createAgentSessionFn, sessionManager, settingsManager, agentDir, abortSignal, ctx)
+    const promise = manager.runTask(taskId, planContent, dynamicToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx)
       .then(() => {
         completedIds.add(taskId);
         const rec = manager.agents.get(taskId);
@@ -133,7 +140,7 @@ const handleStall = async (readyIds, running, stallCount, allTasks, completedIds
   return newStallCount;
 };
 
-export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widget, createAgentSessionFn, abortSignal, sessionManager, settingsManager, agentDir, ctx, dagTaskManagers) {
+export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widget, createAgentSessionFn, abortSignal, onUpdate, ctx, dagTaskManagers) {
   if (!createAgentSessionFn) throw new Error("createAgentSession function not provided to dagExecutionLoop");
 
   const sessionId = ctx?.sessionManager?.getSessionId?.();
@@ -183,7 +190,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       stallCount = await handleStall(readyIds, running, stallCount, allTasks, completedIds, ctx);
       if (readyIds.length === 0) continue;
 
-      spawnReadyTasks(readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, sessionManager, settingsManager, agentDir, ctx, failedIds);
+      spawnReadyTasks(readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx, failedIds);
       updateWidget();
       stallCount = 0;
       await Promise.race(running.values());

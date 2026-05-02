@@ -36,14 +36,10 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
   } catch { return false; }
 };
 
-export const createTaskSession = async (taskId, ctx, createAgentSessionFn, sessionManager, settingsManager) => {
+export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
   try {
     const result = await createAgentSessionFn({
       cwd: ctx?.cwd ?? process.cwd(),
-      sessionManager,
-      settingsManager,
-      modelRegistry: ctx?.modelRegistry,
-      resourceLoader: ctx?.resourceLoader,
     });
     return result.session;
   } catch (err) {
