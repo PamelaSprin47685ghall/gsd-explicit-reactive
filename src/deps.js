@@ -103,18 +103,13 @@ function findCycle(tasks) {
   return [];
 }
 
-export function computeReadySet(deps, allTasks) {
-  const statuses = new Map(allTasks.map(t => [t.id, t.status]));
-  const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
-
+export function computeReadySet(deps, allTasks, completedIds) {
+  // Use completedIds (in-memory state) instead of allTasks[].status (DB state)
+  // to avoid race conditions and DB sync delays
   return Object.entries(deps.tasks ?? {})
     .filter(([id, spec]) => {
-      const s = (statuses.get(id) ?? "pending").toLowerCase();
-      if (doneStatuses.has(s)) return false;
-      return spec.depends_on.every(d => {
-        const ds = (statuses.get(d) ?? "pending").toLowerCase();
-        return doneStatuses.has(ds);
-      });
+      if (completedIds && completedIds.has(id)) return false;
+      return spec.depends_on.every(d => completedIds ? completedIds.has(d) : false);
     })
     .map(([id]) => id);
 }

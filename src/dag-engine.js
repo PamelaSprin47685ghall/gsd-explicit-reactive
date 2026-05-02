@@ -162,7 +162,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
 
   const updateWidget = () => {
     if (!widget) return;
-    const currentReady = computeReadySet(deps, allTasks);
+    const currentReady = computeReadySet(deps, allTasks, completedIds);
     const tasks = allTasks.map(t => {
       const rec = manager.agents.get(t.id);
       let status = "pending";
@@ -193,7 +193,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       checkDagAbort(abortSignal, manager);
       allTasks = syncDbState(db, contextToolkit, allTasks, completedIds);
 
-      const readyIds = computeReadySet(deps, allTasks).filter(id => !completedIds.has(id) && !running.has(id) && !manager.failedTasks.has(id));
+      const readyIds = computeReadySet(deps, allTasks, completedIds).filter(id => !completedIds.has(id) && !running.has(id) && !manager.failedTasks.has(id));
 
       if (checkDeadlock(readyIds, running, allTasks, completedIds, failedIds)) break;
 

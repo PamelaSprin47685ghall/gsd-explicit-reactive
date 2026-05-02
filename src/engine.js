@@ -95,7 +95,7 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidget, dagTaskManager
     return backToPlanWithError(ctx, autoDispatch);
   }
 
-  const ready = computeReadySet(deps, tasks);
+  const ready = computeReadySet(deps, tasks, new Set());
   if (ready.length === 0) {
     const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
     const allDone = tasks.every(t => doneStatuses.has(t.status?.toLowerCase()));
