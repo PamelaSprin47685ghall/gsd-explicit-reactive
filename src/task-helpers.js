@@ -104,7 +104,11 @@ export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, a
         return;
       }
       currentPrompt = "You exited without calling `gsd_task_complete`. You MUST finish the task and then call gsd_task_complete.";
-      if (++emptyTurnCount >= 10) throw new Error(`Agent stuck: ${emptyTurnCount} consecutive empty turns without completing task.`);
+      if (++emptyTurnCount >= 10) {
+        // Reset and retry with base prompt instead of throwing
+        emptyTurnCount = 0;
+        currentPrompt = basePrompt + `\n\n**SYSTEM NOTICE**: You have exited ${emptyTurnCount} times without completing the task. Please review the task plan and call gsd_task_complete when done.`;
+      }
       await new Promise(r => setTimeout(r, 0));
     } catch (err) {
       if (abortSignal?.aborted || taskAbort.signal.aborted) {
