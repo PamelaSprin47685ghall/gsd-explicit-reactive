@@ -51,30 +51,62 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
       throw new Error(`Main session ${sessionId ?? "unknown"} not registered`);
     }
 
+    // 从主会话强继承所有关键运行时，确保子会话与主会话完全等同
     const options = { cwd: ctx?.cwd ?? process.cwd() };
-    const extraActiveToolNames = [
-      ...(Array.isArray(ctx?.extraActiveToolNames) ? ctx.extraActiveToolNames : []),
-      ...(ctx?.session?.getActiveToolNames?.() ?? []),
-    ].filter(Boolean);
 
-    const SESSION_OPTION_KEYS = [
-      ["tools", ctx?.tools],
-      ["extraActiveToolNames", extraActiveToolNames.length > 0 ? [...new Set(extraActiveToolNames)] : undefined],
-      ["model", ctx?.session?.getModel?.()],
-      ["thinkingLevel", ctx?.session?.getThinkingLevel?.()],
-      ["resourceLoader", ctx?.resourceLoader],
-      ["agentDir", ctx?.agentDir],
-      ["modelRegistry", ctx?.modelRegistry],
-      ["settingsManager", ctx?.settingsManager],
-    ];
-    for (const [key, value] of SESSION_OPTION_KEYS) {
-      if (value !== undefined && value !== null) options[key] = value;
+    if (mainSession.resourceLoader) {
+      options.resourceLoader = mainSession.resourceLoader;
+    }
+    if (mainSession.modelRegistry) {
+      options.modelRegistry = mainSession.modelRegistry;
+    }
+    if (mainSession.settingsManager) {
+      options.settingsManager = mainSession.settingsManager;
+    }
+    if (mainSession.model) {
+      options.model = mainSession.model;
+    }
+    if (mainSession.thinkingLevel) {
+      options.thinkingLevel = mainSession.thinkingLevel;
+    }
+    if (mainSession.getActiveToolNames) {
+      const activeToolNames = mainSession.getActiveToolNames();
+      if (activeToolNames?.length > 0) {
+        options.extraActiveToolNames = activeToolNames;
+      }
+    }
+    // 继承 customTools（private 字段，JS 可访问但加防御）
+    if (mainSession._customTools?.length > 0) {
+      options.customTools = mainSession._customTools;
+    }
+    // 继承 scopedModels（private 字段）
+    if (mainSession._scopedModels?.length > 0) {
+      options.scopedModels = mainSession._scopedModels;
+    }
+    // 保留 ctx 传入的 tools（SDK 自定义工具）
+    if (Array.isArray(ctx?.tools) && ctx.tools.length > 0) {
+      options.tools = ctx.tools;
     }
 
     const result = await createAgentSessionFn(options);
     if (!result?.session) throw new Error("session factory returned no session instance");
 
     const session = result.session;
+
+    // 防回退断言：检查子会话扩展加载数量是否与主会话一致
+    try {
+      const mainExts = mainSession.resourceLoader?.getExtensions?.();
+      const childExts = session.resourceLoader?.getExtensions?.();
+      const mainExtCount = mainExts?.extensions?.length ?? 0;
+      const childExtCount = childExts?.extensions?.length ?? 0;
+      if (childExtCount < mainExtCount) {
+        ctx?.ui?.notify?.(
+          `[${taskId}] WARNING: child session loaded ${childExtCount} extensions vs main ${mainExtCount}. ` +
+          `Guardian and other extensions may be missing. Ensure resourceLoader is inherited correctly.`,
+          "warning"
+        );
+      }
+    } catch {}
     const listeners = mainSession._eventListeners;
     if (!Array.isArray(listeners)) {
       throw new Error(`main session ${sessionId} has no event listeners`);
