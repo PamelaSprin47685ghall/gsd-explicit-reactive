@@ -17,7 +17,8 @@ export class DagTaskManager {
     this.abortControllers.set(taskId, taskAbort);
 
     try {
-      const session = await createTaskSession(taskId, ctx, createAgentSessionFn);
+      // Pass main session ctx to enable UI injection
+      const session = await createTaskSession(taskId, ctx, createAgentSessionFn, ctx);
 
       const availableTools = session.getActiveToolNames?.() ?? [];
       const requiredTools = ["gsd_task_complete"];

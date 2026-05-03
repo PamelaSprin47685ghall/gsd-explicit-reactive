@@ -37,7 +37,7 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
   } catch { return false; }
 };
 
-export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
+export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainSessionCtx) => {
   try {
     const options = { cwd: ctx?.cwd ?? process.cwd() };
     const extraActiveToolNames = [
@@ -63,11 +63,77 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
     if (!result?.session) {
       throw new Error("session factory returned no session instance");
     }
-    return result.session;
+    
+    const session = result.session;
+    
+    // MONKEY PATCH: Inject main session's UI into task session's tool execution context
+    if (mainSessionCtx?.ui) {
+      patchSessionUIContext(session, taskId, mainSessionCtx.ui);
+    }
+    
+    return session;
   } catch (err) {
     throw new Error(`Failed to create agent session for ${taskId}: ${err.message}`);
   }
 };
+
+/**
+ * Monkey patch: intercept task session's tool execution to inject main session's UI.
+ * This makes task output render exactly like main session output.
+ */
+function patchSessionUIContext(session, taskId, mainUI) {
+  // Store original _buildRuntime if it exists
+  const original_buildRuntime = session._buildRuntime;
+  if (typeof original_buildRuntime !== 'function') return;
+  
+  // Override _buildRuntime to inject our UI proxy
+  session._buildRuntime = function(options) {
+    const result = original_buildRuntime.call(this, options);
+    
+    // Patch each tool's execute function to use main UI
+    if (result?.tools) {
+      for (const tool of result.tools) {
+        const originalExecute = tool.execute;
+        if (typeof originalExecute === 'function') {
+          tool.execute = async function(toolCallId, params, signal, onUpdate, ctx) {
+            // Create a proxy context that uses main session's UI
+            const proxyCtx = {
+              ...ctx,
+              ui: createUIProxy(mainUI, taskId),
+            };
+            return originalExecute.call(this, toolCallId, params, signal, onUpdate, proxyCtx);
+          };
+        }
+      }
+    }
+    
+    return result;
+  };
+}
+
+/**
+ * Create a UI proxy that prefixes all notifications with [taskId]
+ */
+function createUIProxy(mainUI, taskId) {
+  return {
+    ...mainUI,
+    notify: (message, type) => {
+      mainUI.notify(`[${taskId}] ${message}`, type);
+    },
+    setStatus: (key, text) => {
+      mainUI.setStatus(`${taskId}-${key}`, text ? `[${taskId}] ${text}` : undefined);
+    },
+    setWorkingMessage: (message) => {
+      mainUI.setWorkingMessage(message ? `[${taskId}] ${message}` : undefined);
+    },
+    // Forward other methods as-is
+    select: mainUI.select?.bind(mainUI),
+    confirm: mainUI.confirm?.bind(mainUI),
+    input: mainUI.input?.bind(mainUI),
+    onTerminalInput: mainUI.onTerminalInput?.bind(mainUI),
+    setWidget: mainUI.setWidget?.bind(mainUI),
+  };
+}
 
 export const setupSessionAbort = (session, taskAbort, record) => {
   if (!taskAbort.signal) return;
