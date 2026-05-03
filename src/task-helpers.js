@@ -1,4 +1,4 @@
-import { mainSessionsBySessionId } from "../index.js";
+import { mainSessionsBySessionId } from "./session-registry.js";
 
 // Task execution helpers
 
@@ -39,34 +39,18 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
   } catch { return false; }
 };
 
-export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainSessionCtx) => {
+export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
   try {
     const sessionId = ctx?.sessionManager?.getSessionId?.();
-    ctx?.ui?.notify?.(`[${taskId}] Looking for session ${sessionId} in global map...`, 'info');
-    ctx?.ui?.notify?.(`[${taskId}] Global map size: ${mainSessionsBySessionId.size}`, 'info');
-    ctx?.ui?.notify?.(`[${taskId}] Global map keys: ${Array.from(mainSessionsBySessionId.keys()).join(', ')}`, 'info');
-    
-    // Get main session from global map (populated by monkey-patched createAgentSession)
-    const mainSession = mainSessionsBySessionId.get(sessionId);
-    ctx?.ui?.notify?.(`[${taskId}] Main session found: ${!!mainSession}`, mainSession ? 'success' : 'warning');
-    
-    if (mainSession) {
-      ctx?.ui?.notify?.(`[${taskId}] Main session type: ${typeof mainSession}`, 'info');
-      
-      // Check all possible property names for event listeners
-      const possibleNames = ['_eventListeners', 'eventListeners', '_listeners', 'listeners', '_subscribers', 'subscribers'];
-      for (const name of possibleNames) {
-        if (mainSession[name]) {
-          ctx?.ui?.notify?.(`[${taskId}] Found ${name}: ${Array.isArray(mainSession[name]) ? mainSession[name].length : typeof mainSession[name]}`, 'success');
-        }
-      }
-      
-      // List all properties
-      const allKeys = Object.keys(mainSession);
-      ctx?.ui?.notify?.(`[${taskId}] Session has ${allKeys.length} properties`, 'info');
-      ctx?.ui?.notify?.(`[${taskId}] First 10 keys: ${allKeys.slice(0, 10).join(', ')}`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] sessionId=${sessionId}`, "info");
+
+    const mainSession = sessionId ? mainSessionsBySessionId.get(sessionId) : null;
+    ctx?.ui?.notify?.(`[${taskId}] registry ${mainSession ? "hit" : "miss"} for session`, mainSession ? "success" : "error");
+
+    if (!mainSession) {
+      throw new Error(`Main session ${sessionId ?? "unknown"} not registered`);
     }
-    
+
     const options = { cwd: ctx?.cwd ?? process.cwd() };
     const extraActiveToolNames = [
       ...(Array.isArray(ctx?.extraActiveToolNames) ? ctx.extraActiveToolNames : []),
@@ -88,101 +72,26 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainS
     }
 
     const result = await createAgentSessionFn(options);
-    if (!result?.session) {
-      throw new Error("session factory returned no session instance");
-    }
-    
+    if (!result?.session) throw new Error("session factory returned no session instance");
+
     const session = result.session;
-    
-    // MONKEY PATCH: Make task session's events visible to main session's Interactive Mode
-    if (mainSessionCtx?.ui && mainSession) {
-      ctx?.ui?.notify?.(`[${taskId}] Attempting to bridge events...`, 'info');
-      bridgeSessionEvents(session, mainSession, taskId, mainSessionCtx.ui);
-    } else {
-      ctx?.ui?.notify?.(`[${taskId}] Cannot bridge: mainSession=${!!mainSession}, ui=${!!mainSessionCtx?.ui}`, 'warning');
+    const listeners = mainSession._eventListeners;
+    if (!Array.isArray(listeners)) {
+      throw new Error(`main session ${sessionId} has no event listeners`);
     }
-    
+
+    session.subscribe((event) => {
+      for (const listener of listeners) {
+        listener(event);
+      }
+    });
+
+    ctx?.ui?.notify?.(`[${taskId}] bridged to ${listeners.length} listeners`, "success");
     return session;
   } catch (err) {
     throw new Error(`Failed to create agent session for ${taskId}: ${err.message}`);
   }
 };
-
-/**
- * BLACK MAGIC: Bridge task session's events to main session's event listeners.
- * This makes Interactive Mode render task session's tools as if they were main session's.
- */
-function bridgeSessionEvents(taskSession, mainSession, taskId, mainUI) {
-  // Access main session's private _eventListeners array (black magic!)
-  const mainListeners = mainSession._eventListeners;
-  
-  mainUI.notify?.(`[${taskId}] DEBUG: _eventListeners type: ${typeof mainListeners}, isArray: ${Array.isArray(mainListeners)}, length: ${mainListeners?.length}`, 'info');
-  
-  if (!Array.isArray(mainListeners) || mainListeners.length === 0) {
-    mainUI.notify?.(`[${taskId}] FALLBACK: Cannot access event listeners (${mainListeners?.length || 0} found) - using notify()`, 'warning');
-    fallbackToNotify(taskSession, taskId, mainUI);
-    return;
-  }
-  
-  mainUI.notify?.(`[${taskId}] SUCCESS: Bridging to ${mainListeners.length} main session listeners`, 'success');
-  
-  // Subscribe to task session and forward ALL events to main session's listeners
-  taskSession.subscribe((event) => {
-    if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
-      mainUI.notify?.(`[${taskId}] Event: ${event.type} - ${event.toolName}`, 'info');
-    }
-    
-    // Prefix tool names with [taskId] so they're distinguishable
-    let modifiedEvent = event;
-    
-    if (event.type === 'tool_execution_start') {
-      modifiedEvent = {
-        ...event,
-        toolName: `[${taskId}] ${event.toolName}`,
-      };
-    } else if (event.type === 'tool_execution_end') {
-      modifiedEvent = {
-        ...event,
-        toolName: `[${taskId}] ${event.toolName}`,
-      };
-    }
-    
-    // Forward to ALL main session's listeners (including Interactive Mode)
-    let forwardedCount = 0;
-    for (const listener of mainListeners) {
-      try {
-        listener(modifiedEvent);
-        forwardedCount++;
-      } catch (err) {
-        mainUI.notify?.(`[${taskId}] Listener error: ${err.message}`, 'error');
-      }
-    }
-    
-    if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
-      mainUI.notify?.(`[${taskId}] Forwarded to ${forwardedCount} listeners`, 'info');
-    }
-  });
-}
-
-/**
- * Fallback: use notify() if we can't access event listeners
- */
-function fallbackToNotify(session, taskId, mainUI) {
-  session.subscribe((event) => {
-    if (event.type === 'tool_execution_start') {
-      mainUI.notify?.(`[${taskId}] ▸ ${event.toolName}`, 'info');
-    } else if (event.type === 'tool_execution_end') {
-      const status = event.error ? '✗' : '✓';
-      const duration = event.durationMs ? ` (${(event.durationMs / 1000).toFixed(1)}s)` : '';
-      mainUI.notify?.(`[${taskId}] ${status} ${event.toolName}${duration}`, event.error ? 'warning' : 'info');
-    }
-  });
-}
-
-/**
- * Monkey patch: inject task session's messages into main session's message stream.
- * This makes the main session's interactive mode render task output automatically.
- */
 
 export const setupSessionAbort = (session, taskAbort, record) => {
   if (!taskAbort.signal) return;

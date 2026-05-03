@@ -17,8 +17,7 @@ export class DagTaskManager {
     this.abortControllers.set(taskId, taskAbort);
 
     try {
-      // Pass main session ctx to enable UI injection
-      const session = await createTaskSession(taskId, ctx, createAgentSessionFn, ctx);
+      const session = await createTaskSession(taskId, ctx, createAgentSessionFn);
 
       const availableTools = session.getActiveToolNames?.() ?? [];
       const requiredTools = ["gsd_task_complete"];
@@ -44,20 +43,6 @@ export class DagTaskManager {
           record.unsubscribes.push(session.subscribe(event => {
             if (event.type === "tool_execution_start") {
               record.tool = event.toolName;
-              // Show tool execution in real-time
-              ctx?.ui?.notify?.(`[${taskId}] ▸ ${event.toolName}`, "info");
-            } else if (event.type === "tool_execution_end") {
-              // Show tool completion
-              const status = event.error ? "✗" : "✓";
-              ctx?.ui?.notify?.(`[${taskId}] ${status} ${event.toolName}`, event.error ? "warning" : "info");
-            } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
-              // Stream assistant text
-              if (onUpdate) {
-                onUpdate({ type: "text", text: `[${taskId}] ${event.assistantMessageEvent.delta}` });
-              }
-            } else if (event.type === "turn_end") {
-              // Show turn completion
-              ctx?.ui?.notify?.(`[${taskId}] Turn ${event.turnNumber || '?'} complete`, "info");
             }
           }));
         }
