@@ -15,50 +15,55 @@ export class DagTaskManager {
 
     const taskAbort = new AbortController();
     this.abortControllers.set(taskId, taskAbort);
-    this.agents.set(taskId, { session: null, status: "starting", startedAt: Date.now(), unsubscribes: [] });
-
-    const session = await createTaskSession(taskId, ctx, createAgentSessionFn)
-      .catch(err => { this.abortControllers.delete(taskId); throw err; });
-
-    const availableTools = session.getActiveToolNames?.() ?? [];
-    const requiredTools = ["gsd_task_complete"];
-    const optionalTools = ["manage_todo_list", "loop_control"];
-    const missingOptionalTools = optionalTools.filter(toolName => !availableTools.includes(toolName));
-    if (missingOptionalTools.length > 0) {
-      ctx?.ui?.notify?.(`[${taskId}] Optional extension tools unavailable in task session: ${missingOptionalTools.join(", ")}`, "warning");
-    }
-    
-    if (!requiredTools.some(toolName => availableTools.includes(toolName)) && !availableTools.includes("gsd_complete_task")) {
-      const errorMsg = `Task session for ${taskId} missing gsd_task_complete tool. Available: ${availableTools.join(", ")}`;
-      ctx?.ui?.notify?.(errorMsg, "error");
-      throw new Error(errorMsg);
-    }
-
-    session.setActiveToolsByName?.((session.getActiveToolNames?.() ?? []).filter(t => t !== "_wait_for_dag_completion"));
-
-    const record = { session, status: "running", startedAt: this.agents.get(taskId)?.startedAt ?? Date.now(), unsubscribes: [] };
-    this.agents.set(taskId, record);
-
-    if (session.subscribe) {
-      record.unsubscribes.push(session.subscribe(event => {
-        if (event.type === "tool_execution_start") {
-          record.tool = event.toolName;
-        } else if (event.type === "assistant_message" && onUpdate) {
-          const content = event.content?.[0];
-          if (content?.type === "text" && content.text) {
-            onUpdate({ type: "text", text: `[${taskId}] ${content.text}` });
-          }
-        }
-      }));
-    }
-
-    setupSessionAbort(session, taskAbort, record);
 
     try {
+      const session = await createTaskSession(taskId, ctx, createAgentSessionFn);
+
+      const availableTools = session.getActiveToolNames?.() ?? [];
+      const requiredTools = ["gsd_task_complete"];
+      const optionalTools = ["manage_todo_list", "loop_control"];
+      const missingOptionalTools = optionalTools.filter(toolName => !availableTools.includes(toolName));
+      if (missingOptionalTools.length > 0) {
+        ctx?.ui?.notify?.(`[${taskId}] Optional extension tools unavailable in task session: ${missingOptionalTools.join(", ")}`, "warning");
+      }
+
+      if (!requiredTools.some(toolName => availableTools.includes(toolName)) && !availableTools.includes("gsd_complete_task")) {
+        const errorMsg = `Task session for ${taskId} missing gsd_task_complete tool. Available: ${availableTools.join(", ")}`;
+        ctx?.ui?.notify?.(errorMsg, "error");
+        throw new Error(errorMsg);
+      }
+
+      session.setActiveToolsByName?.((session.getActiveToolNames?.() ?? []).filter(t => t !== "_wait_for_dag_completion"));
+
+      const record = { session, status: "running", startedAt: Date.now(), unsubscribes: [] };
+      this.agents.set(taskId, record);
+
+      try {
+        if (session.subscribe) {
+          record.unsubscribes.push(session.subscribe(event => {
+            if (event.type === "tool_execution_start") {
+              record.tool = event.toolName;
+            } else if (event.type === "assistant_message" && onUpdate) {
+              const content = event.content?.[0];
+              if (content?.type === "text" && content.text) {
+                onUpdate({ type: "text", text: `[${taskId}] ${content.text}` });
+              }
+            }
+          }));
+        }
+      } catch (subErr) {
+        ctx?.ui?.notify?.(`[${taskId}] Failed to subscribe to session events: ${subErr.message}`, "warning");
+      }
+
+      setupSessionAbort(session, taskAbort, record);
+
       await runTaskLoop(session, taskId, buildTaskPrompt(taskId, planContent, dynamicToolkit), dynamicToolkit, abortSignal, taskAbort, record, ctx);
     } finally {
-      record.unsubscribes.forEach(unsub => { try { unsub(); } catch {} });
-      record.unsubscribes = [];
+      const rec = this.agents.get(taskId);
+      if (rec) {
+        rec.unsubscribes?.forEach(unsub => { try { unsub(); } catch {} });
+      }
+      this.agents.delete(taskId);
       this.abortControllers.delete(taskId);
     }
   }
@@ -279,13 +284,10 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
 
     if (failedIds.size > 0) {
       for (const taskId of failedIds) {
-        const rec = manager.agents.get(taskId);
-        if (rec?.status === "running" || rec?.status === "starting") {
-          try {
-            db?.updateTaskStatus?.(contextToolkit.mid, contextToolkit.sid, taskId, "pending");
-          } catch (rollbackErr) {
-            ctx?.ui?.notify?.(`Failed to roll back ${taskId} to pending: ${rollbackErr.message}`, "warning");
-          }
+        try {
+          db?.updateTaskStatus?.(contextToolkit.mid, contextToolkit.sid, taskId, "pending");
+        } catch (rollbackErr) {
+          ctx?.ui?.notify?.(`Failed to roll back ${taskId} to pending: ${rollbackErr.message}`, "warning");
         }
       }
       try {

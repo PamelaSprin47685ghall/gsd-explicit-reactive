@@ -1,5 +1,5 @@
 import { ensureBundledExtensionPath } from "./src/self-injection.js";
-import { injectExplicitDagEngine, registerWaitTool } from "./src/engine.js";
+import { injectExplicitDagEngine, registerWaitTool, width1Warned } from "./src/engine.js";
 import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
 

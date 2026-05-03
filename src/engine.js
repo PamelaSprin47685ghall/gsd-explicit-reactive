@@ -4,7 +4,7 @@ import { loadAndValidateDeps, computeReadySet, calculateDagMetrics, persistLates
 import { dagExecutionLoop } from "./dag-engine.js";
 import { payloadStore } from "./payload-store.js";
 
-const width1Warned = new Map();
+export const width1Warned = new Map();
 /** Prune stale width-1 warnings when a slice's DEPS is reloaded or cleared. */
 const clearWidth1Warning = (mid, sid) => width1Warned.delete(`${mid}/${sid}`);
 

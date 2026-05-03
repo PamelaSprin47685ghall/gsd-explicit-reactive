@@ -80,7 +80,7 @@ export const setupSessionAbort = (session, taskAbort, record) => {
   }
 };
 
-const FATAL_ERROR_PATTERNS = ["session closed", "unauthorized", "token limit exceeded", "rate limit exceeded"];
+const FATAL_ERROR_PATTERNS = ["session closed"];
 const MAX_RETRIES = 20;
 const MAX_EMPTY_TURNS = 30;
 
