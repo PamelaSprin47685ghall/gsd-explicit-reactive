@@ -8,26 +8,43 @@ class TurnOutputGate {
     this.listeners = []
   }
 
+  // 内部统一的发射器
+  _emitToMain(event, taskId) {
+    // 【精准防火墙】：只拦截会引发核心状态机(Auto-Loop/Guardian)刷新的系统级生命周期！
+    // 坚决放行 turn_start/turn_end，以便 GSD 前端 UI 能够正常加锁、渲染气泡。
+    const FORBIDDEN_EVENTS = new Set([
+      'agent_start',
+      'agent_end', // 引发核心轮次结算
+      'session_start',
+      'session_shutdown', // 引发环境重置
+      'session_before_switch',
+    ])
+
+    if (FORBIDDEN_EVENTS.has(event?.type)) {
+      return // 静默丢弃
+    }
+
+    const marked =
+      event && typeof event === 'object'
+        ? { ...event, _dagChildSession: true, _dagTaskId: taskId }
+        : event
+
+    for (const listener of this.listeners) {
+      try {
+        listener(marked)
+      } catch {}
+    }
+  }
+
   handleEvent(event, taskId) {
     const isTurnStart = event?.type === 'turn_start'
     const isTurnEnd = event?.type === 'turn_end'
 
-    const emit = (ev) => {
-      const marked =
-        ev && typeof ev === 'object'
-          ? { ...ev, _dagChildSession: true, _dagTaskId: taskId }
-          : ev
-      for (const listener of this.listeners) {
-        try {
-          listener(marked)
-        } catch {}
-      }
-    }
-
     if (isTurnStart) {
+      // 申请 UI 锁
       if (!this.owner || this.owner === taskId) {
         this.owner = taskId
-        emit(event)
+        this._emitToMain(event, taskId)
       } else {
         this._buffer(event, taskId)
       }
@@ -36,17 +53,18 @@ class TurnOutputGate {
 
     if (isTurnEnd) {
       if (this.owner === taskId) {
-        emit(event)
-        this.owner = null
-        this._drain()
+        this._emitToMain(event, taskId) // 放行 UI 封口事件
+        this.owner = null // 释放 UI 锁
+        this._drain() // 叫号下一个任务
       } else {
         this._buffer(event, taskId)
       }
       return
     }
 
+    // 正常的消息或工具输出
     if (!this.owner || this.owner === taskId) {
-      emit(event)
+      this._emitToMain(event, taskId)
     } else {
       this._buffer(event, taskId)
     }
@@ -72,16 +90,11 @@ class TurnOutputGate {
       const events = this.buffers.get(nextTaskId) ?? []
       this.buffers.delete(nextTaskId)
       this.owner = nextTaskId
+
       for (const event of events) {
-        const marked =
-          event && typeof event === 'object'
-            ? { ...event, _dagChildSession: true, _dagTaskId: nextTaskId }
-            : event
-        for (const listener of this.listeners) {
-          try {
-            listener(marked)
-          } catch {}
-        }
+        this._emitToMain(event, nextTaskId)
+
+        // 遇到 UI 封口事件，释放当前拥有权，准备可能的下一次循环
         if (event?.type === 'turn_end') {
           this.owner = null
         }
