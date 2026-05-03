@@ -119,7 +119,7 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
   }
 };
 
-const registerWaitTool = (pi, dagTaskManagers) => {
+export const registerWaitTool = (pi, dagTaskManagers) => {
   if (waitToolRegistered.has(pi)) return;
   waitToolRegistered.add(pi);
 

@@ -1,5 +1,5 @@
 import { ensureBundledExtensionPath } from "./src/self-injection.js";
-import { injectExplicitDagEngine } from "./src/engine.js";
+import { injectExplicitDagEngine, registerWaitTool } from "./src/engine.js";
 import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
 
@@ -27,6 +27,8 @@ export default async function explicitReactivePlugin(pi) {
       ctx?.ui?.notify?.(`[DAG] Initialization failed: ${err.message}`, "error");
     }
   };
+
+  registerWaitTool(pi, dagTaskManagers);
 
   // Inject once at plugin bootstrap to avoid missing the first dispatch cycle.
   await injectEngineSafely(undefined);
