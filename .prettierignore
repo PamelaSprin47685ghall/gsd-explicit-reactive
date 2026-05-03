@@ -1,0 +1,4 @@
+package-lock.json
+.gsd/
+dist/
+node_modules/
