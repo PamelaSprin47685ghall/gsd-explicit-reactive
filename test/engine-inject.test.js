@@ -54,8 +54,8 @@ describe("injectExplicitDagEngine", () => {
     assert.strictEqual(dagRules.length, 1);
 
     // Both reactive-execute and execute-task should be disabled
-    const disabledReactive = rules.find((rule) => String(rule.name).startsWith("[DAG Disabled]") && String(rule.name).includes("reactive-execute"));
-    const disabledExecute = rules.find((rule) => String(rule.name).startsWith("[DAG Disabled] executing → execute-task"));
+    const disabledReactive = rules.find((rule) => rule._dagDisabled && String(rule.name).includes("reactive-execute"));
+    const disabledExecute = rules.find((rule) => rule._dagDisabled && String(rule.name).includes("executing → execute-task") && !String(rule.name).includes("recover missing task plan"));
     const recoverRule = rules.find((rule) => String(rule.name).includes("recover missing task plan"));
 
     assert.ok(disabledReactive, "reactive-execute should be disabled");

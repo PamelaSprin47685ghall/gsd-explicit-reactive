@@ -9,13 +9,14 @@ const width1Warned = new Map();
 const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` file in the same directory as `PLAN.md` to define task dependencies for parallel execution. Format:\n```json\n{\n  \"version\": 1,\n  \"tasks\": {\n    \"T01\": { \"depends_on\": [] },\n    \"T02\": { \"depends_on\": [\"T01\"] }\n  }\n}\n```";
 
 const waitToolRegistered = new WeakSet();
-let cachedCreateAgentSessionFn = null;
+const sessionFactoryCache = new WeakMap();
 
 const resolveCreateSessionFactory = (pi) => {
-  if (cachedCreateAgentSessionFn) return cachedCreateAgentSessionFn;
-  if (typeof pi?.createAgentSession !== "function") return null;
-  cachedCreateAgentSessionFn = pi.createAgentSession;
-  return cachedCreateAgentSessionFn;
+  if (!pi || typeof pi?.createAgentSession !== "function") return null;
+  const cached = sessionFactoryCache.get(pi);
+  if (cached) return cached;
+  sessionFactoryCache.set(pi, pi.createAgentSession);
+  return pi.createAgentSession;
 };
 
 const isPrimaryExecuteTaskRule = (ruleName) => {
@@ -30,13 +31,11 @@ const disableOfficialRules = (rules) => {
     r._dagDisabled = true;
     r._dagOriginalName = r.name;
     r.match = async () => null;
-    r.name = `[DAG Disabled] ${r.name}`;
   });
   rules.filter(r => isPrimaryExecuteTaskRule(r.name) && !r._dagDisabled).forEach(r => {
     r._dagDisabled = true;
     r._dagOriginalName = r.name;
     r.match = async () => null;
-    r.name = `[DAG Disabled] ${r.name}`;
   });
 };
 
@@ -108,7 +107,7 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
     ctx?.ui?.notify?.(`[DAG] Successfully completed ${result.completed.length} tasks.`, "success");
     return { content: [{ type: "text", text: `All DAG tasks completed. Done: ${result.completed.length}/${result.total}.` }], details: { completed: result.completed, total: result.total } };
   } catch (err) {
-    return { content: [{ type: "text", text: `DAG execution failed catastrophically: ${err.message}` }], details: { error: "dag_execution_failed", message: err.message } };
+    return { content: [{ type: "text", text: `DAG execution failed catastrophically: ${err.message}` }], isError: true, details: { error: "dag_execution_failed", message: err.message } };
   }
 };
 
@@ -274,23 +273,21 @@ async function backToPlanWithError(ctx, autoDispatch) {
     };
   }
 
-  const originalPhase = ctx.state.phase;
-  ctx.state.phase = "planning";
-  try {
-    const matchFn = planRule.match || planRule.where;
-    if (typeof matchFn !== "function") {
-      return {
-        action: "stop",
-        reason: `plan-slice rule found but no match/where function available.`,
-        level: "error",
-      };
-    }
-    const planResult = await matchFn(ctx);
-    if (planResult?.prompt) {
-      planResult.prompt = `**PLAN REJECTED: DEPS.json ERROR** 🚨\nYou MUST rewrite the DEPS.json file correctly.\n${errorBlock}\n\n---\n\n${planResult.prompt}`;
-    }
-    return planResult;
-  } finally {
-    ctx.state.phase = originalPhase;
+  const matchFn = planRule.match || planRule.where;
+  if (typeof matchFn !== "function") {
+    return {
+      action: "stop",
+      reason: `plan-slice rule found but no match/where function available.`,
+      level: "error",
+    };
   }
+
+  // Deep-clone state to avoid polluting the real execution context.
+  const planCtx = { ...ctx, state: { ...ctx.state, phase: "planning", activeSlice: ctx.state.activeSlice ? { ...ctx.state.activeSlice } : undefined } };
+  const planResult = await matchFn(planCtx);
+
+  if (planResult?.prompt) {
+    planResult.prompt = `**PLAN REJECTED: DEPS.json ERROR** 🚨\nYou MUST rewrite the DEPS.json file correctly.\n${errorBlock}\n\n---\n\n${planResult.prompt}`;
+  }
+  return planResult;
 }

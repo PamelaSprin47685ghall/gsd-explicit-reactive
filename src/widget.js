@@ -7,6 +7,8 @@ export function createDagStatusWidget(ctx) {
   let active = false;
   let tasks = [];       // { id, title, status, tool, elapsed }
   let interval = null;
+  let dirty = false;
+  let rendering = false;
 
   return {
     key: "dag-status",
@@ -14,25 +16,27 @@ export function createDagStatusWidget(ctx) {
     start(dagState) {
       active = true;
       tasks = dagState.tasks ?? [];
+      dirty = true;
       render();
       if (!interval) {
-        interval = setInterval(render, 2000);
+        interval = setInterval(() => { if (dirty) render(); }, 2000);
       }
     },
 
     update(dagState) {
       tasks = dagState.tasks ?? [];
-      if (active) render();
+      dirty = true;
+      if (active && !rendering) render();
     },
 
     stop() {
       active = false;
       tasks = [];
+      dirty = false;
       if (interval) {
         clearInterval(interval);
         interval = null;
       }
-      // Clear the widget area
       try { ctx.ui?.setWidget?.("dag-status", undefined); } catch {}
     },
 
@@ -42,7 +46,9 @@ export function createDagStatusWidget(ctx) {
   };
 
   function render() {
-    if (!active) return;
+    if (!active || rendering) return;
+    rendering = true;
+    dirty = false;
 
     const done = tasks.filter(t => t.status === "done").length;
     const running = tasks.filter(t => t.status === "running").length;
@@ -67,6 +73,8 @@ export function createDagStatusWidget(ctx) {
     try {
       ctx.ui?.setWidget?.("dag-status", lines, { position: "above" });
     } catch { /* UI not ready — non-critical */ }
+
+    rendering = false;
   }
 }
 

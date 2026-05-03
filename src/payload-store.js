@@ -2,7 +2,7 @@
 
 export const payloadStore = {
   _map: new Map(),
-  _ttl: 30000,
+  _ttl: 600000,
   set(key, value, ttl) {
     const expiresIn = ttl ?? this._ttl;
     const old = this._map.get(key);

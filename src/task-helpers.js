@@ -39,39 +39,20 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
 
 export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
   try {
-    const options = {
-      cwd: ctx?.cwd ?? process.cwd(),
-    };
+    const options = { cwd: ctx?.cwd ?? process.cwd() };
 
-    if (ctx?.tools) {
-      options.tools = ctx.tools;
-    }
-
-    if (ctx?.session?.getActiveToolNames) {
-      options.extraActiveToolNames = ctx.session.getActiveToolNames();
-    }
-
-    if (ctx?.session?.getModel) {
-      options.model = ctx.session.getModel();
-    }
-    if (ctx?.session?.getThinkingLevel) {
-      options.thinkingLevel = ctx.session.getThinkingLevel();
-    }
-
-    if (ctx?.resourceLoader) {
-      options.resourceLoader = ctx.resourceLoader;
-    }
-
-    if (ctx?.agentDir) {
-      options.agentDir = ctx.agentDir;
-    }
-
-    if (ctx?.modelRegistry) {
-      options.modelRegistry = ctx.modelRegistry;
-    }
-
-    if (ctx?.settingsManager) {
-      options.settingsManager = ctx.settingsManager;
+    const SESSION_OPTION_KEYS = [
+      ["tools", ctx?.tools],
+      ["extraActiveToolNames", ctx?.session?.getActiveToolNames?.()],
+      ["model", ctx?.session?.getModel?.()],
+      ["thinkingLevel", ctx?.session?.getThinkingLevel?.()],
+      ["resourceLoader", ctx?.resourceLoader],
+      ["agentDir", ctx?.agentDir],
+      ["modelRegistry", ctx?.modelRegistry],
+      ["settingsManager", ctx?.settingsManager],
+    ];
+    for (const [key, value] of SESSION_OPTION_KEYS) {
+      if (value !== undefined && value !== null) options[key] = value;
     }
 
     const result = await createAgentSessionFn(options);
@@ -95,15 +76,29 @@ export const setupSessionAbort = (session, taskAbort, record) => {
   }
 };
 
+const FATAL_ERROR_PATTERNS = ["session closed", "unauthorized", "token limit exceeded", "rate limit exceeded"];
+const MAX_RETRIES = 20;
+const MAX_EMPTY_TURNS = 30;
+
 export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, abortSignal, taskAbort, record, ctx) => {
   let currentPrompt = basePrompt;
   let retryCount = 0;
   let emptyTurnCount = 0;
+  let totalEmptyTurnCount = 0;
 
   while (true) {
     if (abortSignal?.aborted || taskAbort.signal.aborted) {
       record.status = "aborted";
       throw new Error("Task aborted");
+    }
+
+    if (retryCount >= MAX_RETRIES) {
+      record.status = "failed";
+      throw new Error(`Task ${taskId} exceeded maximum retry count (${MAX_RETRIES}). Last error was persistent.`);
+    }
+    if (totalEmptyTurnCount >= MAX_EMPTY_TURNS) {
+      record.status = "failed";
+      throw new Error(`Task ${taskId} exited ${MAX_EMPTY_TURNS} times without calling gsd_task_complete. Aborting.`);
     }
 
     try {
@@ -116,8 +111,8 @@ export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, a
         return;
       }
       currentPrompt = "You exited without calling `gsd_task_complete`. You MUST finish the task and then call gsd_task_complete.";
+      totalEmptyTurnCount++;
       if (++emptyTurnCount >= 10) {
-        // Reset and retry with base prompt instead of throwing
         currentPrompt = basePrompt + `\n\n**SYSTEM NOTICE**: You have exited 10 times without completing the task. Please review the task plan and call gsd_task_complete when done.`;
         emptyTurnCount = 0;
       }
@@ -127,8 +122,16 @@ export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, a
         record.status = "aborted";
         throw new Error("Task aborted");
       }
+
+      const errMsg = err?.message ?? String(err);
+      const isFatal = FATAL_ERROR_PATTERNS.some(p => errMsg.toLowerCase().includes(p));
+      if (isFatal) {
+        record.status = "failed";
+        throw new Error(`Task ${taskId} encountered fatal error: ${errMsg}`);
+      }
+
       emptyTurnCount = 0;
-      currentPrompt = basePrompt + `\n\n**SYSTEM ERROR ON PREVIOUS ATTEMPT**:\n${err.message}\nPlease try another approach. Do not give up.`;
+      currentPrompt = basePrompt + `\n\n**SYSTEM ERROR ON PREVIOUS ATTEMPT**:\n${errMsg}\nPlease try another approach. Do not give up.`;
       await sleep(Math.min(2000 * Math.pow(2, retryCount++), 30000), taskAbort.signal).catch(() => {});
     }
   }

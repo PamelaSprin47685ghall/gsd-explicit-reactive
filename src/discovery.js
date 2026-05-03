@@ -47,7 +47,7 @@ export async function loadGsdCore() {
       }
       return loaded;
     } catch (err) {
-      console.error(`[DAG] Failed to load GSD core from ${dir}: ${err.message}`);
+      // Silently skip this candidate; index.js reports the final failure.
       continue;
     }
   }

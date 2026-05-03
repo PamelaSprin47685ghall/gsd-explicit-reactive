@@ -146,8 +146,9 @@ export function calculateDagMetrics(deps) {
     return memo[id];
   }
 
-  const L = Math.max(...taskIds.map(getDepth));
-  return { totalTasks: N, criticalPathLength: L, averageWidth: N / L };
+  const depths = taskIds.map(getDepth).filter(d => d > 0);
+  const L = depths.length > 0 ? Math.max(...depths) : 0;
+  return { totalTasks: N, criticalPathLength: L, averageWidth: L === 0 ? 0 : N / L };
 }
 
 export function persistLatestError(basePath, mid, sid, errors, invalidDeps, ctx) {

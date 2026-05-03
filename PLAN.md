@@ -51,7 +51,8 @@ PLAN 阶段
         │           ├── 为每个 ready task 调用 pi.createAgentSession()
         │           ├── 异步并行执行，订阅 assistant_message → onUpdate 转发
         │           ├── 任意 task 完成 → 更新 ready set → spawn 新 task
-        │           ├── 失败 task → 无限 retry（while 循环内 session.prompt）
+        │           ├── 失败 task → 有限 retry（MAX_RETRIES=20 / MAX_EMPTY_TURNS=30），超限则标记 failed
+        │           ├── DAG loop finally：若存在 failed task → 写入 REPLAN-TRIGGER + 回滚 in_progress→pending
         │           └── 所有 task 完成 → tool resolve → 主会话结束
         │
         └── GSD verifyExpectedArtifact 识别 reactive-execute unitType
@@ -74,7 +75,7 @@ PLAN 阶段
 | DEPS 无效 | 无限重试规划，不 hard stop |
 | 执行接管 | dispatch 为 `reactive-execute` unitType（GSD 原生支持），`_wait_for_dag_completion` 工具挂起主会话 |
 | Task agent 上下文 | 注入：Milestone CONTEXT 摘要 + slice goal + task plan 全文 + 上游已完成 task 摘要 |
-| 失败任务 | 无限 retry，不兜底。下游不启动。成功 task 保持完成 |
+| 失败任务 | 有限 retry（`MAX_RETRIES=20` / `MAX_EMPTY_TURNS=30`），超限时标记 failed 并退出。DAG loop finally 中：若含 failed task，写入 `REPLAN-TRIGGER`；同时将 failed tasks 从 `in_progress` 回滚为 `pending`，使 GSD 状态机的下一轮 dispatch 不会跳过它们。正常完成时自动清理 REPLAN-TRIGGER。 |
 | Task 退出 | 未调用 `gsd_task_complete` 则 `session.prompt()` 继续，不提前退出 |
 | 工具权限 | 全工具继承，包括 subagent |
 | 运行时 | 不依赖 `pi-subagents`，不修改 gsd-2 |
@@ -99,13 +100,14 @@ PLAN 阶段
 ### D003: 并发执行策略
 - **决策时间**: 2026-05-02
 - **决策**: 不依赖 `ctx.state.activeTask`，查询所有 ready tasks 并行执行
-- **unitId 格式**: `{mid}/{sid}/reactive+T01,T02,T03`
+- **unitId 格式**: `{mid}/{sid}/reactive+T01,T02,T03`（仅编码 dispatch 首轮 ready set，后续 spawn 的 task 不追加到 unitId）
+- **补充**: unitId 批次编码是 dispatch 时刻的快照。DAG loop 动态 spawn 的后续 task 不在 unitId 中，但 verifyExpectedArtifact 仅检查 unitId 中声明的 task SUMMARY。后续 task 的 SUMMARY 通过 GSD 的 deriveState 间接检测。
 - **状态**: ✅ 已实现
 
 ### D004: 状态同步策略
 - **决策时间**: 2026-05-02
-- **决策**: dispatch 前将所有 ready tasks 标记为 `in_progress`
-- **理由**: GSD 状态机需要知道这些 tasks 正在后台执行，避免重复 dispatch
+- **决策**: dispatch 前将所有 ready tasks 标记为 `in_progress`；DAG 异常退出时回滚 failed tasks 为 `pending`
+- **理由**: GSD 状态机需要知道这些 tasks 正在后台执行，避免重复 dispatch。回滚防止进程崩溃后 task 永久停留在 in_progress 导致状态机卡死。
 - **状态**: ✅ 已实现
 
 ### D005: 日志输出策略
@@ -118,6 +120,18 @@ PLAN 阶段
 - **决策时间**: 2026-05-03
 - **决策**: 使用 GSD 原生 `reactive-execute` unitType，禁用官方 `reactive-execute` 和 `execute-task` 规则
 - **理由**: 自定义 unitType 导致 GSD 的 verifyExpectedArtifact、auto-artifact-paths、state derivation 全部返回 null/false，session closeout 失败。复用 reactive-execute unitType + GSD 原生生命周期，同时禁用官方规则确保只走 DAG 路径
+- **状态**: ✅ 已实现
+
+### D007: Session Factory 缓存策略
+- **决策时间**: 2026-05-03
+- **决策**: 用 WeakMap 以 pi 实例为 key 缓存 createAgentSession 函数引用
+- **理由**: 模块级单例缓存在 pi 实例替换（热重载、多 session）时返回过期引用。WeakMap 允许 pi 被 GC 时自动清理，同一 pi 对象跨 session 复用时正确共享。
+- **状态**: ✅ 已实现
+
+### D008: Widget 渲染节流策略
+- **决策时间**: 2026-05-03
+- **决策**: dirty flag + rendering guard 替代每次 update 立即 render
+- **理由**: dagExecutionLoop 每秒 updateWidget + spawn/completion 各调一次，高频场景下冗余渲染。dirty 标记让 setInterval(2s) 兜底，update 只在空闲时立即刷。
 - **状态**: ✅ 已实现
 
 ---
@@ -151,6 +165,7 @@ validateExplicitDeps(deps, sliceTasks) → { ok, errors }
 findCycle(tasks) → string[]
 computeReadySet(deps, allTasks, completedIds) → string[]
 calculateDagMetrics(deps) → { totalTasks, criticalPathLength, averageWidth }
+  // 循环 DAG 时 getDepth 返回 0，filter(d=>d>0) 后 Math.max 避免 -Infinity
 persistLatestError(basePath, mid, sid, errors, invalidDeps, ctx)
 clearLatestError(basePath, mid, sid, ctx)
 loadAndValidateDeps(basePath, mid, sid, sliceTasks) → { deps, error, errors }
@@ -180,6 +195,8 @@ injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTaskManagers)
 //   3. Registers _wait_for_dag_completion tool via pi.registerTool()
 //   4. Syncs rule-registry singleton
 //   5. Patches plan-slice prompt to include DEPS.json hint
+//   6. Caches createAgentSession per pi via WeakMap (D007)
+//   7. DAG failure 时回滚 failed tasks in_progress→pending (D004)
 ```
 
 ### task-helpers.js

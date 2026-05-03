@@ -1,3 +1,5 @@
+import { writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { computeReadySet } from "./deps.js";
 import { buildTaskPrompt, createTaskSession, setupSessionAbort, runTaskLoop } from "./task-helpers.js";
 
@@ -71,11 +73,13 @@ export class DagTaskManager {
   }
 }
 
-const syncDbState = (db, contextToolkit, allTasks, completedIds) => {
+const syncDbState = (db, contextToolkit, allTasks, completedIds, ctx) => {
   if (!db?.getSliceTasks) return allTasks;
   try {
     const freshTasks = db.getSliceTasks(contextToolkit.mid, contextToolkit.sid);
-    if (freshTasks?.length !== allTasks.length) return allTasks;
+    if (!Array.isArray(freshTasks) || freshTasks.length !== allTasks.length) {
+      return allTasks;
+    }
     const doneStatuses = new Set(["complete", "done", "skipped", "success"]);
     for (const t of freshTasks) {
       if (doneStatuses.has(t.status?.toLowerCase()) && !completedIds.has(t.id)) {
@@ -111,7 +115,15 @@ const spawnReadyTasks = (readyIds, deps, allTasks, running, completedIds, manage
 };
 
 const initDagState = (allTasks, sessionId, dagTaskManagers) => {
-  const manager = sessionId && dagTaskManagers?.get(sessionId) || new DagTaskManager();
+  let manager = sessionId && dagTaskManagers?.get(sessionId);
+  if (!manager) {
+    manager = new DagTaskManager();
+  } else {
+    manager.abortAll();
+    manager.agents.clear();
+    manager.failedTasks.clear();
+    manager.abortControllers.clear();
+  }
   if (sessionId && dagTaskManagers && !dagTaskManagers.has(sessionId)) dagTaskManagers.set(sessionId, manager);
   
   const completedIds = new Set();
@@ -123,10 +135,8 @@ const initDagState = (allTasks, sessionId, dagTaskManagers) => {
 
 const checkDagAbort = (abortSignal, manager) => {
   if (abortSignal?.aborted) throw new Error("DAG execution aborted by parent signal.");
-  if (manager.failedTasks.size > 0) {
-    manager.abortAll();
-    throw new Error(`DAG infrastructure failure: task(s) [${[...manager.failedTasks].join(", ")}] cannot recover.`);
-  }
+  // Individual task failures are handled by spawnReadyTasks catch.
+  // We no longer abort all siblings on a single task failure.
 };
 
 const checkDeadlock = (readyIds, running, allTasks, completedIds, failedIds) => {
@@ -134,7 +144,8 @@ const checkDeadlock = (readyIds, running, allTasks, completedIds, failedIds) => 
     const allDone = allTasks.every(t => completedIds.has(t.id) || failedIds.has(t.id));
     if (allDone) return true;
     const stuck = allTasks.filter(t => !completedIds.has(t.id) && !failedIds.has(t.id)).map(t => t.id);
-    throw new Error(`DAG deadlock: no tasks ready, none running, but incomplete: [${stuck.join(", ")}]`);
+    const failedMsg = failedIds.size > 0 ? ` Failed tasks: [${[...failedIds].join(", ")}].` : "";
+    throw new Error(`DAG stuck: no tasks ready, none running, but incomplete: [${stuck.join(", ")}].${failedMsg} Triggering slice replan.`);
   }
   return false;
 };
@@ -201,7 +212,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
     updateWidget();
     while (completedIds.size < allTasks.length) {
       checkDagAbort(abortSignal, manager);
-      allTasks = syncDbState(db, contextToolkit, allTasks, completedIds);
+      allTasks = syncDbState(db, contextToolkit, allTasks, completedIds, ctx);
 
       const readyIds = computeReadySet(deps, allTasks, completedIds).filter(id => !completedIds.has(id) && !running.has(id) && !manager.failedTasks.has(id));
 
@@ -249,6 +260,9 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       peakRunning,
       failed: manager.failedTasks.size,
     }, ctx);
+    if (failedIds.size > 0) {
+      throw new Error(`DAG completed with permanent task failures: [${[...failedIds].join(", ")}]`);
+    }
     ctx?.ui?.notify?.(`[DAG] Completed ${completedIds.size}/${allTasks.length} tasks (peak parallel: ${peakRunning}).`, "success");
     return { completed: [...completedIds], total: allTasks.length };
   } finally {
@@ -257,5 +271,31 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
     manager.abortAll();
     abortSignal?.removeEventListener("abort", onDagAbort);
     if (sessionId && dagTaskManagers) dagTaskManagers.delete(sessionId);
+
+    if (failedIds.size > 0) {
+      // Roll back failed tasks from in_progress to pending so GSD doesn't
+      // consider them "being executed" on next dispatch cycle.
+      for (const taskId of failedIds) {
+        const rec = manager.agents.get(taskId);
+        if (rec?.status === "running" || rec?.status === "starting") {
+          try {
+            db?.updateTaskStatus?.(contextToolkit.mid, contextToolkit.sid, taskId, "pending");
+          } catch {}
+        }
+      }
+      try {
+        const triggerPath = join(contextToolkit.basePath, ".gsd", "milestones", contextToolkit.mid, "slices", contextToolkit.sid, "REPLAN-TRIGGER");
+        writeFileSync(triggerPath, JSON.stringify({ failedTasks: [...failedIds], triggeredAt: new Date().toISOString() }), "utf-8");
+      } catch (err) {
+        ctx?.ui?.notify?.(`[DAG] CRITICAL: failed to write REPLAN-TRIGGER — slice replan will not be triggered automatically: ${err.message}`, "error");
+      }
+    } else {
+      try {
+        const triggerPath = join(contextToolkit.basePath, ".gsd", "milestones", contextToolkit.mid, "slices", contextToolkit.sid, "REPLAN-TRIGGER");
+        if (existsSync(triggerPath)) unlinkSync(triggerPath);
+      } catch (err) {
+        ctx?.ui?.notify?.(`[DAG] failed to clean REPLAN-TRIGGER: ${err.message}`, "warning");
+      }
+    }
   }
 }
