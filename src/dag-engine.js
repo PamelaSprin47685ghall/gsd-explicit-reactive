@@ -43,6 +43,10 @@ export class DagTaskManager {
           record.unsubscribes.push(session.subscribe(event => {
             if (event.type === "tool_execution_start") {
               record.tool = event.toolName;
+              // Immediately notify widget of tool change
+              if (ctx?.ui?.notify) {
+                ctx.ui.notify(`[${taskId}] → ${event.toolName}`, "info");
+              }
             } else if (event.type === "assistant_message" && onUpdate) {
               const content = event.content?.[0];
               if (content?.type === "text" && content.text) {

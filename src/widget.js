@@ -71,8 +71,11 @@ export function createDagStatusWidget(ctx) {
     }
 
     try {
-      ctx.ui?.setWidget?.("dag-status", lines, { position: "above" });
-    } catch { /* UI not ready — non-critical */ }
+      ctx.ui?.setWidget?.("dag-status", lines, { placement: "aboveEditor" });
+    } catch (err) {
+      // Log error for debugging
+      console.error("[dag-widget] setWidget failed:", err);
+    }
 
     rendering = false;
   }
