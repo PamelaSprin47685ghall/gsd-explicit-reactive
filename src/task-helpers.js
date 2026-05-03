@@ -39,20 +39,38 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
 
 export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainSessionCtx) => {
   try {
-    // DEBUG: Check what we received
-    ctx?.ui?.notify?.(`[${taskId}] createTaskSession called`, 'info');
-    ctx?.ui?.notify?.(`[${taskId}] mainSessionCtx exists: ${!!mainSessionCtx}`, 'info');
-    ctx?.ui?.notify?.(`[${taskId}] mainSessionCtx.ui exists: ${!!mainSessionCtx?.ui}`, 'info');
-    ctx?.ui?.notify?.(`[${taskId}] ctx.session exists: ${!!ctx?.session}`, 'info');
-    ctx?.ui?.notify?.(`[${taskId}] ctx.sessionManager exists: ${!!ctx?.sessionManager}`, 'info');
+    // Try to extract main session from ctx's closure
+    // ctx.isIdle, ctx.abort, etc. are bound to this.session in InteractiveMode
+    // We can try to access it through these methods
     
-    // Try to get main session through sessionManager
-    let mainSession = ctx?.session;
-    if (!mainSession && ctx?.sessionManager) {
-      // SessionManager might have a reference to the current session
-      // Try common property names
-      mainSession = ctx.sessionManager.session || ctx.sessionManager.currentSession || ctx.sessionManager._session;
-      ctx?.ui?.notify?.(`[${taskId}] Found session via sessionManager: ${!!mainSession}`, 'info');
+    let mainSession = null;
+    
+    // Method 1: Try to get session from getContextUsage (it accesses this.session.getContextUsage())
+    try {
+      const getContextUsage = ctx?.getContextUsage;
+      if (getContextUsage) {
+        // Try to access the bound 'this' (which is the session)
+        // This is a hack - we're trying to extract the session from the closure
+        const boundThis = getContextUsage.bind?.(null);
+        // Actually, we can't easily extract 'this' from a bound function
+        // Let me try another approach
+      }
+    } catch {}
+    
+    // Method 2: Check if ctx has any hidden properties
+    const ctxKeys = Object.keys(ctx || {});
+    const ctxSymbols = Object.getOwnPropertySymbols(ctx || {});
+    ctx?.ui?.notify?.(`[${taskId}] ctx keys: ${ctxKeys.join(', ')}`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] ctx symbols: ${ctxSymbols.length}`, 'info');
+    
+    // Method 3: Try common hidden property names
+    const possibleSessionProps = ['_session', '__session', 'session', '$session', 'agentSession'];
+    for (const prop of possibleSessionProps) {
+      if (ctx?.[prop]) {
+        mainSession = ctx[prop];
+        ctx?.ui?.notify?.(`[${taskId}] Found session via ctx.${prop}`, 'success');
+        break;
+      }
     }
     
     const options = { cwd: ctx?.cwd ?? process.cwd() };

@@ -14,6 +14,7 @@ export default async function explicitReactivePlugin(pi) {
   // Module-level state (not stored on pi)
   const dagWidgets = new Map(); // sessionId -> widget
   const dagTaskManagers = new Map(); // sessionId -> DagTaskManager
+  const mainSessions = new Map(); // sessionId -> main session (for event bridging)
 
   const injectEngineSafely = async (ctx) => {
     try {

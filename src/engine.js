@@ -139,7 +139,7 @@ export const registerWaitTool = (pi, dagTaskManagers) => {
   });
 };
 
-export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTaskManagers) {
+export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTaskManagers, mainSessions) {
   const autoDispatch = core["auto-dispatch"];
   const ruleRegistry = core["rule-registry"];
   if (!autoDispatch?.DISPATCH_RULES) {
