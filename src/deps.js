@@ -1,9 +1,8 @@
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 export function loadDepsError(basePath, mid, sid) {
   const path = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS-ERROR.json");
-  if (!existsSync(path)) return null;
   try { return JSON.parse(readFileSync(path, "utf-8")); }
   catch { return null; }
 }
@@ -167,23 +166,19 @@ export function persistLatestError(basePath, mid, sid, errors, invalidDeps, ctx)
 
 export function clearLatestError(basePath, mid, sid, ctx) {
   const errorPath = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS-ERROR.json");
-  try {
-    if (existsSync(errorPath)) unlinkSync(errorPath);
-  } catch (err) {
-    ctx?.ui?.notify?.(`[DAG] Failed to delete DEPS-ERROR.json: ${err.message}`, "error");
-  }
+  try { unlinkSync(errorPath); }
+  catch (err) { if (err.code !== "ENOENT") ctx?.ui?.notify?.(`Failed to delete DEPS-ERROR.json: ${err.message}`, "warning"); }
 }
 
 export function loadAndValidateDeps(basePath, mid, sid, sliceTasks) {
   const depsPath = join(basePath, ".gsd", "milestones", mid, "slices", sid, "DEPS.json");
-  if (!existsSync(depsPath)) {
-    return { deps: null, error: `Missing DEPS.json: ${depsPath}`, errors: [`Missing DEPS.json: ${depsPath}`] };
-  }
-
   let raw;
   try {
     raw = readFileSync(depsPath, "utf-8");
   } catch (e) {
+    if (e.code === "ENOENT") {
+      return { deps: null, error: `Missing DEPS.json in slice ${sid}`, errors: [`Missing DEPS.json — create it alongside PLAN.md`] };
+    }
     return { deps: null, error: `Cannot read DEPS.json: ${e.message}`, errors: [`Cannot read DEPS.json: ${e.message}`] };
   }
 

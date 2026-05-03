@@ -51,22 +51,22 @@ export default async function explicitReactivePlugin(pi) {
     await injectEngineSafely(ctx);
   });
 
-  // Issue 9: Clean up background agents on session shutdown
+  // Issue: Clean up stale per-session state on shutdown
   pi.on("session_shutdown", async (_event, ctx) => {
     const sessionId = ctx.sessionManager?.getSessionId?.();
     if (sessionId) {
-      // Clean up task manager
       if (dagTaskManagers.has(sessionId)) {
         const manager = dagTaskManagers.get(sessionId);
         manager.abortAll();
         dagTaskManagers.delete(sessionId);
       }
-      // Clean up widget
       if (dagWidgets.has(sessionId)) {
         const widget = dagWidgets.get(sessionId);
         widget.stop?.();
         dagWidgets.delete(sessionId);
       }
     }
+    // Prune width-1 warnings to prevent unbounded growth
+    width1Warned.clear();
   });
 }

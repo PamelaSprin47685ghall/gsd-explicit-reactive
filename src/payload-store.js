@@ -23,6 +23,12 @@ export const payloadStore = {
     }
     return entry.value;
   },
+  /** Atomically retrieve and remove a payload. Prevents TOCTOU between get+delete. */
+  take(key) {
+    const value = this.get(key);
+    if (value !== undefined) this.delete(key);
+    return value;
+  },
   delete(key) {
     const old = this._map.get(key);
     if (old?.timer) clearTimeout(old.timer);

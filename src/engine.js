@@ -1,10 +1,12 @@
 import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { loadAndValidateDeps, computeReadySet, calculateDagMetrics, persistLatestError, clearLatestError, loadDepsError } from "./deps.js";
 import { dagExecutionLoop } from "./dag-engine.js";
 import { payloadStore } from "./payload-store.js";
 
 const width1Warned = new Map();
+/** Prune stale width-1 warnings when a slice's DEPS is reloaded or cleared. */
+const clearWidth1Warning = (mid, sid) => width1Warned.delete(`${mid}/${sid}`);
 
 const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` file in the same directory as `PLAN.md` to define task dependencies for parallel execution. Format:\n```json\n{\n  \"version\": 1,\n  \"tasks\": {\n    \"T01\": { \"depends_on\": [] },\n    \"T02\": { \"depends_on\": [\"T01\"] }\n  }\n}\n```";
 
@@ -84,9 +86,8 @@ const emitDagDispatchLog = (ctx, payload) => {
 };
 
 const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, pi) => {
-  const payload = payloadStore.get(_params.unitId);
-  if (!payload) return { content: [{ type: "text", text: "No DAG payload found for this unitId." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
-  payloadStore.delete(_params.unitId);
+  const payload = payloadStore.take(_params.unitId);
+  if (!payload) return { content: [{ type: "text", text: "DAG payload expired or missing. Try re-dispatching the task." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
 
   const { deps, allTasks, contextToolkit, db, dagWidget, dagTaskManagers: payloadDagTaskManagers } = payload;
   const effectiveDagTaskManagers = payloadDagTaskManagers || dagTaskManagers;
@@ -112,10 +113,11 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
       { ...ctx, extraActiveToolNames: getCurrentActiveToolNames(pi) },
       effectiveDagTaskManagers,
     );
-    ctx?.ui?.notify?.(`[DAG] Successfully completed ${result.completed.length} tasks.`, "success");
-    return { content: [{ type: "text", text: `All DAG tasks completed. Done: ${result.completed.length}/${result.total}.` }], details: { completed: result.completed, total: result.total } };
+    ctx?.ui?.notify?.(`DAG completed ${result.completed.length}/${result.total} tasks.`, "success");
+    return { content: [{ type: "text", text: `All DAG tasks completed (${result.completed.length}/${result.total}).` }], details: { completed: result.completed, total: result.total } };
   } catch (err) {
-    return { content: [{ type: "text", text: `DAG execution failed catastrophically: ${err.message}` }], isError: true, details: { error: "dag_execution_failed", message: err.message } };
+    const msg = err.message?.length > 200 ? err.message.slice(0, 200) + "…" : err.message;
+    return { content: [{ type: "text", text: `DAG execution failed: ${msg}` }], isError: true, details: { error: "dag_execution_failed", message: err.message } };
   }
 };
 
@@ -226,15 +228,14 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
 
   const readMilestoneContext = (basePath, mid) => {
     const path = join(basePath, ".gsd", "milestones", mid, `${mid}-CONTEXT.md`);
-    try { if (existsSync(path)) return readFileSync(path, "utf-8").slice(0, 2000); } catch {}
-    return null;
+    try { return readFileSync(path, "utf-8").slice(0, 2000); } catch { return null; }
   };
 
   const readTaskPlans = (basePath, mid, sid, tasks) => {
     const plans = {};
     for (const t of tasks) {
       const path = join(basePath, ".gsd", "milestones", mid, "slices", sid, "tasks", `${t.id}-PLAN.md`);
-      try { if (existsSync(path)) plans[t.id] = readFileSync(path, "utf-8"); } catch {}
+      try { plans[t.id] = readFileSync(path, "utf-8"); } catch {}
     }
     return plans;
   };
@@ -276,7 +277,7 @@ async function backToPlanWithError(ctx, autoDispatch) {
   if (!planRule) {
     return {
       action: "stop",
-      reason: `DEPS.json error in ${mid}/${sid}. No plan-slice dispatch rule found — cannot redispatch.` + (errorBlock ? `\nErrors:\n${errorLines.join("\n")}` : ""),
+      reason: `Cannot recover from DEPS.json error in ${mid}/${sid} — no plan-slice rule available to redispatch.${errorLines.length > 0 ? `\nErrors:\n${errorLines.join("\n")}` : ""}`,
       level: "error",
     };
   }
@@ -285,7 +286,7 @@ async function backToPlanWithError(ctx, autoDispatch) {
   if (typeof matchFn !== "function") {
     return {
       action: "stop",
-      reason: `plan-slice rule found but no match/where function available.`,
+      reason: `plan-slice rule found but has no match function — cannot redispatch.`,
       level: "error",
     };
   }
@@ -295,7 +296,7 @@ async function backToPlanWithError(ctx, autoDispatch) {
   const planResult = await matchFn(planCtx);
 
   if (planResult?.prompt) {
-    planResult.prompt = `**PLAN REJECTED: DEPS.json ERROR** 🚨\nYou MUST rewrite the DEPS.json file correctly.\n${errorBlock}\n\n---\n\n${planResult.prompt}`;
+    planResult.prompt = `**DEPS.json validation failed.** You must fix the DEPS.json file.\n${errorBlock}\n\n---\n\n${planResult.prompt}`;
   }
   return planResult;
 }

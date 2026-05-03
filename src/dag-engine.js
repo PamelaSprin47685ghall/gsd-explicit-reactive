@@ -111,7 +111,7 @@ const spawnReadyTasks = (readyIds, deps, allTasks, running, completedIds, manage
       .catch(err => {
         manager.failedTasks.add(taskId);
         failedIds.add(taskId);
-        ctx?.ui?.notify?.(`[DAG] Task ${taskId} error: ${err.message} — FAILED`, "error");
+        ctx?.ui?.notify?.(`Task ${taskId} failed: ${err.message}`, "error");
         running.delete(taskId);
       });
     running.set(taskId, promise);
@@ -159,7 +159,7 @@ const handleStall = async (readyIds, running, stallCount, allTasks, completedIds
   const newStallCount = stallCount + 1;
   if (newStallCount >= 5) {
     const stuck = allTasks.filter(t => !completedIds.has(t.id) && !running.has(t.id)).map(t => t.id);
-    ctx?.ui?.notify?.(`[DAG] stalled (${newStallCount} cycles), remaining: [${stuck.join(", ")}]`, "warning");
+    ctx?.ui?.notify?.(`DAG stalled (${newStallCount} cycles) — waiting for ${stuck.length} remaining task(s)`, "warning");
   }
   await new Promise(r => setTimeout(r, 200 * Math.min(newStallCount, 10)));
   return newStallCount;
@@ -235,7 +235,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       stallCount = await handleStall(readyIds, running, stallCount, allTasks, completedIds, ctx);
       if (readyIds.length === 0) continue;
 
-      ctx?.ui?.notify?.(`[DAG] Spawning tasks: ${readyIds.join(", ")}`, "info");
+      ctx?.ui?.notify?.(`[DAG] Dispatching ${readyIds.length} task(s): ${readyIds.join(", ")}`, "info");
       dispatchCycles += 1;
       spawnReadyTasks(readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx, failedIds);
       peakRunning = Math.max(peakRunning, running.size);
@@ -249,7 +249,8 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       updateWidget();
       stallCount = 0;
       if (running.size > 0) {
-        await Promise.race(running.values());
+        // Wait for any running task to settle, then re-evaluate the ready set.
+        await Promise.race([...running.values()]);
       }
       updateWidget();
       await new Promise(r => setImmediate(r));
@@ -267,7 +268,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
     if (failedIds.size > 0) {
       throw new Error(`DAG completed with permanent task failures: [${[...failedIds].join(", ")}]`);
     }
-    ctx?.ui?.notify?.(`[DAG] Completed ${completedIds.size}/${allTasks.length} tasks (peak parallel: ${peakRunning}).`, "success");
+    ctx?.ui?.notify?.(`[DAG] Completed ${completedIds.size}/${allTasks.length} tasks (peak ${peakRunning} parallel).`, "success");
     return { completed: [...completedIds], total: allTasks.length };
   } finally {
     clearInterval(widgetInterval);
@@ -277,28 +278,28 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
     if (sessionId && dagTaskManagers) dagTaskManagers.delete(sessionId);
 
     if (failedIds.size > 0) {
-      // Roll back failed tasks from in_progress to pending so GSD doesn't
-      // consider them "being executed" on next dispatch cycle.
       for (const taskId of failedIds) {
         const rec = manager.agents.get(taskId);
         if (rec?.status === "running" || rec?.status === "starting") {
           try {
             db?.updateTaskStatus?.(contextToolkit.mid, contextToolkit.sid, taskId, "pending");
-          } catch {}
+          } catch (rollbackErr) {
+            ctx?.ui?.notify?.(`Failed to roll back ${taskId} to pending: ${rollbackErr.message}`, "warning");
+          }
         }
       }
       try {
         const triggerPath = join(contextToolkit.basePath, ".gsd", "milestones", contextToolkit.mid, "slices", contextToolkit.sid, "REPLAN-TRIGGER");
         writeFileSync(triggerPath, JSON.stringify({ failedTasks: [...failedIds], triggeredAt: new Date().toISOString() }), "utf-8");
       } catch (err) {
-        ctx?.ui?.notify?.(`[DAG] CRITICAL: failed to write REPLAN-TRIGGER — slice replan will not be triggered automatically: ${err.message}`, "error");
+        ctx?.ui?.notify?.(`[DAG] CRITICAL: Failed to write REPLAN-TRIGGER — automatic replan will not trigger: ${err.message}`, "error");
       }
     } else {
       try {
         const triggerPath = join(contextToolkit.basePath, ".gsd", "milestones", contextToolkit.mid, "slices", contextToolkit.sid, "REPLAN-TRIGGER");
         if (existsSync(triggerPath)) unlinkSync(triggerPath);
       } catch (err) {
-        ctx?.ui?.notify?.(`[DAG] failed to clean REPLAN-TRIGGER: ${err.message}`, "warning");
+        ctx?.ui?.notify?.(`[DAG] Failed to clean REPLAN-TRIGGER: ${err.message}`, "warning");
       }
     }
   }

@@ -162,7 +162,7 @@ describe("dag dispatch integration", () => {
       assert.ok(result);
       assert.strictEqual(result.action, "dispatch");
       assert.strictEqual(result.unitType, "plan-slice");
-      assert.ok(result.prompt.includes("PLAN REJECTED: DEPS.json ERROR"));
+      assert.ok(result.prompt.includes("DEPS.json validation failed"));
       assert.ok(result.prompt.includes("Missing task in DEPS.tasks: T02"));
     } finally {
       rmSync(basePath, { recursive: true, force: true });
