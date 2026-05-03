@@ -161,7 +161,8 @@ export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTas
 }
 
 async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers) {
-  if (ctx.state.phase !== "executing" || !ctx.state.activeSlice) return null;
+  if (ctx.state.phase !== "executing") return null;
+  if (!ctx.state.activeSlice) return backToPlanWithError(ctx, autoDispatch);
 
   const sessionId = ctx.sessionManager?.getSessionId?.();
   const dagWidget = sessionId ? dagWidgets?.get(sessionId) : null;
@@ -275,9 +276,10 @@ async function backToPlanWithError(ctx, autoDispatch) {
   const errorBlock = errorLines.length > 0 ? `\n## DEPS Validation Errors\n${errorLines.join("\n")}` : "";
 
   if (!planRule) {
+    const unit = mid ? `${mid}/${sid ?? "?"}` : "(no milestone)";
     return {
       action: "stop",
-      reason: `Cannot recover from DEPS.json error in ${mid}/${sid} — no plan-slice rule available to redispatch.${errorLines.length > 0 ? `\nErrors:\n${errorLines.join("\n")}` : ""}`,
+      reason: `Cannot recover — no plan-slice rule available to redispatch in ${unit}.${errorLines.length > 0 ? `\nErrors:\n${errorLines.join("\n")}` : ""}`,
       level: "error",
     };
   }
