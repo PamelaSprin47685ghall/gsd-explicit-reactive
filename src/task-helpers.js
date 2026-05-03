@@ -85,14 +85,22 @@ function bridgeSessionEvents(taskSession, mainSession, taskId, mainUI) {
   // Access main session's private _eventListeners array (black magic!)
   const mainListeners = mainSession._eventListeners;
   
-  if (!Array.isArray(mainListeners)) {
-    console.warn(`[${taskId}] Cannot access main session's event listeners - falling back to notify`);
+  console.log(`[${taskId}] DEBUG: mainSession._eventListeners =`, mainListeners);
+  console.log(`[${taskId}] DEBUG: mainListeners is array?`, Array.isArray(mainListeners));
+  console.log(`[${taskId}] DEBUG: mainListeners length:`, mainListeners?.length);
+  
+  if (!Array.isArray(mainListeners) || mainListeners.length === 0) {
+    console.warn(`[${taskId}] Cannot access main session's event listeners (${mainListeners?.length || 0} listeners) - falling back to notify`);
     fallbackToNotify(taskSession, taskId, mainUI);
     return;
   }
   
+  console.log(`[${taskId}] SUCCESS: Bridging events to ${mainListeners.length} main session listeners`);
+  
   // Subscribe to task session and forward ALL events to main session's listeners
   taskSession.subscribe((event) => {
+    console.log(`[${taskId}] Event:`, event.type, event.toolName || '');
+    
     // Prefix tool names with [taskId] so they're distinguishable
     let modifiedEvent = event;
     
@@ -101,21 +109,26 @@ function bridgeSessionEvents(taskSession, mainSession, taskId, mainUI) {
         ...event,
         toolName: `[${taskId}] ${event.toolName}`,
       };
+      console.log(`[${taskId}] Forwarding tool_execution_start:`, modifiedEvent.toolName);
     } else if (event.type === 'tool_execution_end') {
       modifiedEvent = {
         ...event,
         toolName: `[${taskId}] ${event.toolName}`,
       };
+      console.log(`[${taskId}] Forwarding tool_execution_end:`, modifiedEvent.toolName);
     }
     
     // Forward to ALL main session's listeners (including Interactive Mode)
+    let forwardedCount = 0;
     for (const listener of mainListeners) {
       try {
         listener(modifiedEvent);
+        forwardedCount++;
       } catch (err) {
-        // Ignore listener errors
+        console.error(`[${taskId}] Listener error:`, err.message);
       }
     }
+    console.log(`[${taskId}] Forwarded to ${forwardedCount} listeners`);
   });
 }
 
