@@ -85,21 +85,21 @@ function bridgeSessionEvents(taskSession, mainSession, taskId, mainUI) {
   // Access main session's private _eventListeners array (black magic!)
   const mainListeners = mainSession._eventListeners;
   
-  console.log(`[${taskId}] DEBUG: mainSession._eventListeners =`, mainListeners);
-  console.log(`[${taskId}] DEBUG: mainListeners is array?`, Array.isArray(mainListeners));
-  console.log(`[${taskId}] DEBUG: mainListeners length:`, mainListeners?.length);
+  mainUI.notify?.(`[${taskId}] DEBUG: _eventListeners type: ${typeof mainListeners}, isArray: ${Array.isArray(mainListeners)}, length: ${mainListeners?.length}`, 'info');
   
   if (!Array.isArray(mainListeners) || mainListeners.length === 0) {
-    console.warn(`[${taskId}] Cannot access main session's event listeners (${mainListeners?.length || 0} listeners) - falling back to notify`);
+    mainUI.notify?.(`[${taskId}] FALLBACK: Cannot access event listeners (${mainListeners?.length || 0} found) - using notify()`, 'warning');
     fallbackToNotify(taskSession, taskId, mainUI);
     return;
   }
   
-  console.log(`[${taskId}] SUCCESS: Bridging events to ${mainListeners.length} main session listeners`);
+  mainUI.notify?.(`[${taskId}] SUCCESS: Bridging to ${mainListeners.length} main session listeners`, 'success');
   
   // Subscribe to task session and forward ALL events to main session's listeners
   taskSession.subscribe((event) => {
-    console.log(`[${taskId}] Event:`, event.type, event.toolName || '');
+    if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+      mainUI.notify?.(`[${taskId}] Event: ${event.type} - ${event.toolName}`, 'info');
+    }
     
     // Prefix tool names with [taskId] so they're distinguishable
     let modifiedEvent = event;
@@ -109,13 +109,11 @@ function bridgeSessionEvents(taskSession, mainSession, taskId, mainUI) {
         ...event,
         toolName: `[${taskId}] ${event.toolName}`,
       };
-      console.log(`[${taskId}] Forwarding tool_execution_start:`, modifiedEvent.toolName);
     } else if (event.type === 'tool_execution_end') {
       modifiedEvent = {
         ...event,
         toolName: `[${taskId}] ${event.toolName}`,
       };
-      console.log(`[${taskId}] Forwarding tool_execution_end:`, modifiedEvent.toolName);
     }
     
     // Forward to ALL main session's listeners (including Interactive Mode)
@@ -125,10 +123,13 @@ function bridgeSessionEvents(taskSession, mainSession, taskId, mainUI) {
         listener(modifiedEvent);
         forwardedCount++;
       } catch (err) {
-        console.error(`[${taskId}] Listener error:`, err.message);
+        mainUI.notify?.(`[${taskId}] Listener error: ${err.message}`, 'error');
       }
     }
-    console.log(`[${taskId}] Forwarded to ${forwardedCount} listeners`);
+    
+    if (event.type === 'tool_execution_start' || event.type === 'tool_execution_end') {
+      mainUI.notify?.(`[${taskId}] Forwarded to ${forwardedCount} listeners`, 'info');
+    }
   });
 }
 
