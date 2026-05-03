@@ -89,7 +89,7 @@ function createCtx(basePath) {
 }
 
 describe("dag dispatch integration", () => {
-  it("dispatches dag-execution when deps are valid and ready tasks > 1", async () => {
+  it("dispatches reactive-execute when deps are valid and ready tasks > 1", async () => {
     const basePath = createTempBase();
 
     try {
@@ -116,7 +116,7 @@ describe("dag dispatch integration", () => {
 
       injectExplicitDagEngine(core, pi, undefined, new Map(), new Map());
 
-      const dagRule = rules.find((rule) => rule.name === "executing → dag-execution");
+      const dagRule = rules.find((rule) => rule.name === "executing → dag (reactive-execute)");
       assert.ok(dagRule, "dag rule should be injected");
 
       const { ctx } = createCtx(basePath);
@@ -124,8 +124,8 @@ describe("dag dispatch integration", () => {
 
       assert.ok(result);
       assert.strictEqual(result.action, "dispatch");
-      assert.strictEqual(result.unitType, "dag-execution");
-      assert.ok(result.unitId.startsWith("M001/S01/dag+"));
+      assert.strictEqual(result.unitType, "reactive-execute");
+      assert.ok(result.unitId.startsWith("M001/S01/reactive+"));
       assert.ok(result.prompt.includes("_wait_for_dag_completion"));
       assert.ok(registerToolCalls.includes("_wait_for_dag_completion"));
     } finally {
@@ -153,7 +153,7 @@ describe("dag dispatch integration", () => {
       const pi = { registerTool: () => undefined };
       injectExplicitDagEngine(core, pi, undefined, new Map(), new Map());
 
-      const dagRule = rules.find((rule) => rule.name === "executing → dag-execution");
+      const dagRule = rules.find((rule) => rule.name === "executing → dag (reactive-execute)");
       assert.ok(dagRule, "dag rule should be injected");
 
       const { ctx } = createCtx(basePath);

@@ -150,11 +150,12 @@ const handleStall = async (readyIds, running, stallCount, allTasks, completedIds
   return newStallCount;
 };
 
-const emitDagRuntimeLog = (contextToolkit, payload) => {
-  const mid = contextToolkit?.mid ?? "unknown-mid";
-  const sid = contextToolkit?.sid ?? "unknown-slice";
-  const line = `[dag-runtime] ${mid}/${sid} ${JSON.stringify(payload)}\n`;
-  try { process.stderr.write(line); } catch {}
+const emitDagRuntimeLog = (contextToolkit, payload, ctx) => {
+  try {
+    const mid = contextToolkit?.mid ?? "unknown-mid";
+    const sid = contextToolkit?.sid ?? "unknown-slice";
+    ctx?.ui?.notify?.(`[dag] ${mid}/${sid} ${JSON.stringify(payload)}`, "info");
+  } catch {}
 };
 
 export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widget, createAgentSessionFn, abortSignal, onUpdate, ctx, dagTaskManagers) {
@@ -212,7 +213,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
         readyCount: readyIds.length,
         ready: readyIds,
         failed: manager.failedTasks.size,
-      });
+      }, ctx);
 
       if (checkDeadlock(readyIds, running, allTasks, completedIds, failedIds)) break;
 
@@ -229,7 +230,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
         spawned: readyIds,
         runningAfterSpawn: running.size,
         peakRunning,
-      });
+      }, ctx);
       updateWidget();
       stallCount = 0;
       if (running.size > 0) {
@@ -247,7 +248,7 @@ export async function dagExecutionLoop(deps, allTasks, contextToolkit, db, widge
       dispatchCycles,
       peakRunning,
       failed: manager.failedTasks.size,
-    });
+    }, ctx);
     ctx?.ui?.notify?.(`[DAG] Completed ${completedIds.size}/${allTasks.length} tasks (peak parallel: ${peakRunning}).`, "success");
     return { completed: [...completedIds], total: allTasks.length };
   } finally {

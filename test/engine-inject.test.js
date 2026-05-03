@@ -43,22 +43,23 @@ function createMockCore() {
 }
 
 describe("injectExplicitDagEngine", () => {
-  it("should disable official execution rules and inject dag rule", async () => {
+  it("should disable execute-task and reactive-execute, and inject dag rule", async () => {
     const { core, rules } = createMockCore();
     const registerTool = mock.fn(() => undefined);
     const pi = { registerTool };
 
     injectExplicitDagEngine(core, pi, undefined, new Map(), new Map());
 
-    const dagRules = rules.filter((rule) => rule.name === "executing → dag-execution");
+    const dagRules = rules.filter((rule) => rule.name === "executing → dag (reactive-execute)");
     assert.strictEqual(dagRules.length, 1);
 
-    const disabledReactive = rules.find((rule) => String(rule.name).includes("reactive-execute"));
+    // Both reactive-execute and execute-task should be disabled
+    const disabledReactive = rules.find((rule) => String(rule.name).startsWith("[DAG Disabled]") && String(rule.name).includes("reactive-execute"));
     const disabledExecute = rules.find((rule) => String(rule.name).startsWith("[DAG Disabled] executing → execute-task"));
     const recoverRule = rules.find((rule) => String(rule.name).includes("recover missing task plan"));
 
-    assert.ok(disabledReactive.name.startsWith("[DAG Disabled]"));
-    assert.ok(disabledExecute.name.startsWith("[DAG Disabled]"));
+    assert.ok(disabledReactive, "reactive-execute should be disabled");
+    assert.ok(disabledExecute, "execute-task should be disabled");
 
     const reactiveResult = await disabledReactive.match({});
     const executeResult = await disabledExecute.match({});
@@ -82,7 +83,7 @@ describe("injectExplicitDagEngine", () => {
     injectExplicitDagEngine(core, pi, undefined, new Map(), new Map());
     injectExplicitDagEngine(core, pi, undefined, new Map(), new Map());
 
-    const dagRules = rules.filter((rule) => rule.name === "executing → dag-execution");
+    const dagRules = rules.filter((rule) => rule.name === "executing → dag (reactive-execute)");
     assert.strictEqual(dagRules.length, 1);
 
     const planRule = rules.find((rule) => String(rule.name).includes("plan-slice"));

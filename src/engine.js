@@ -9,34 +9,13 @@ const width1Warned = new Map();
 const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` file in the same directory as `PLAN.md` to define task dependencies for parallel execution. Format:\n```json\n{\n  \"version\": 1,\n  \"tasks\": {\n    \"T01\": { \"depends_on\": [] },\n    \"T02\": { \"depends_on\": [\"T01\"] }\n  }\n}\n```";
 
 const waitToolRegistered = new WeakSet();
-
 let cachedCreateAgentSessionFn = null;
-let createAgentSessionImportFailed = false;
 
-const resolveCreateSessionFactory = async (ctx) => {
-  if (cachedCreateAgentSessionFn) {
-    return cachedCreateAgentSessionFn;
-  }
-
-  if (createAgentSessionImportFailed) {
-    return null;
-  }
-
-  try {
-    const sdkModule = await import("@gsd/pi-coding-agent");
-    if (typeof sdkModule?.createAgentSession === "function") {
-      cachedCreateAgentSessionFn = sdkModule.createAgentSession;
-      return cachedCreateAgentSessionFn;
-    }
-  } catch (err) {
-    createAgentSessionImportFailed = true;
-    ctx?.ui?.notify?.(`[DAG] Failed to import @gsd/pi-coding-agent.createAgentSession: ${err.message}`, "error");
-    return null;
-  }
-
-  createAgentSessionImportFailed = true;
-  ctx?.ui?.notify?.("[DAG] @gsd/pi-coding-agent.createAgentSession is unavailable", "error");
-  return null;
+const resolveCreateSessionFactory = (pi) => {
+  if (cachedCreateAgentSessionFn) return cachedCreateAgentSessionFn;
+  if (typeof pi?.createAgentSession !== "function") return null;
+  cachedCreateAgentSessionFn = pi.createAgentSession;
+  return cachedCreateAgentSessionFn;
 };
 
 const isPrimaryExecuteTaskRule = (ruleName) => {
@@ -90,13 +69,14 @@ const registerDagRule = (rules, dagRule) => {
 
 
 const emitDagDispatchLog = (ctx, payload) => {
-  const mid = ctx?.mid ?? "unknown-mid";
-  const sid = ctx?.state?.activeSlice?.id ?? "unknown-slice";
-  const line = `[dag-dispatch] ${mid}/${sid} ${JSON.stringify(payload)}\n`;
-  try { process.stderr.write(line); } catch {}
+  try {
+    const mid = ctx?.mid ?? "unknown-mid";
+    const sid = ctx?.state?.activeSlice?.id ?? "unknown-slice";
+    ctx?.ui?.notify?.(`[dag] ${mid}/${sid} ${JSON.stringify(payload)}`, "info");
+  } catch {}
 };
 
-const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) => {
+const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, pi) => {
   const payload = payloadStore.get(_params.unitId);
   if (!payload) return { content: [{ type: "text", text: "No DAG payload found for this unitId." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
   payloadStore.delete(_params.unitId);
@@ -104,10 +84,10 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) 
   const { deps, allTasks, contextToolkit, db, dagWidget, dagTaskManagers: payloadDagTaskManagers } = payload;
   const effectiveDagTaskManagers = payloadDagTaskManagers || dagTaskManagers;
 
-  const createSessionFactory = await resolveCreateSessionFactory(ctx);
+  const createSessionFactory = resolveCreateSessionFactory(pi);
   if (!createSessionFactory) {
     return {
-      content: [{ type: "text", text: "DAG initialization failed: createAgentSession unavailable" }],
+      content: [{ type: "text", text: "DAG initialization failed: pi.createAgentSession unavailable" }],
       details: { error: "no_create_agent_session" },
     };
   }
@@ -141,7 +121,7 @@ const registerWaitTool = (pi, dagTaskManagers) => {
     label: "Wait for DAG Completion",
     description: "Blocks until all DAG background tasks complete.",
     parameters: { type: "object", properties: { unitId: { type: "string", description: "DAG execution unit ID from the dispatch prompt" } }, required: ["unitId"] },
-    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers),
+    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers, pi),
   });
 };
 
@@ -152,7 +132,7 @@ export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTas
   const rules = autoDispatch.DISPATCH_RULES;
 
   const dagRule = {
-    name: "executing → dag-execution",
+    name: "executing → dag (reactive-execute)",
     match: async (ctx) => executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers),
   };
 
@@ -226,7 +206,7 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
   width1Warned.delete(key);
 
   ctx?.ui?.notify?.(`[DAG] Starting parallel execution for ${ready.length} tasks: ${ready.join(", ")}`, "info");
-  emitDagDispatchLog(ctx, { event: "dispatch", unitType: "dag-execution", ready });
+  emitDagDispatchLog(ctx, { event: "dispatch", unitType: "reactive-execute", ready });
 
   // Mark all ready tasks as in_progress so GSD state machine knows they're being executed
   for (const taskId of ready) {
@@ -260,13 +240,15 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
     db,
   };
 
+  // Use reactive-execute unitType so GSD's native verifyExpectedArtifact, auto-artifact-paths,
+  // and state derivation recognize the unit without patching gsd-2.
   const batchSuffix = ready.join(",");
-  const unitId = `${mid}/${sid}/dag+${batchSuffix}`;
+  const unitId = `${mid}/${sid}/reactive+${batchSuffix}`;
   payloadStore.set(unitId, { deps, allTasks: tasks, contextToolkit, db, dagWidget, dagTaskManagers }, 600000);
 
   return {
     action: "dispatch",
-    unitType: "dag-execution",
+    unitType: "reactive-execute",
     unitId,
     prompt: `You are the DAG Execution Coordinator.\nYou MUST immediately call \`_wait_for_dag_completion\` with { "unitId": "${unitId}" }.\nDo not output any other text.\nThe tool will block until all parallel background tasks finish.`,
   };
