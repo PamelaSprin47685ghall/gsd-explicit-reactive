@@ -22,14 +22,7 @@ const sessionFactoryCache = new WeakMap();
 
 const resolveCreateSessionFactory = () => {
   // Return the patched version if available, otherwise fall back to original
-  const factory = patchedCreateAgentSession || createAgentSession;
-  const isPatched = factory === patchedCreateAgentSession;
-  
-  // Log to console since we don't have ui here
-  console.log(`[DAG] resolveCreateSessionFactory: returning ${isPatched ? 'PATCHED' : 'ORIGINAL'} version`);
-  console.log(`[DAG] patchedCreateAgentSession exists: ${!!patchedCreateAgentSession}`);
-  
-  return factory;
+  return patchedCreateAgentSession || createAgentSession;
 };
 
 const getCurrentActiveToolNames = (ctx) => {
@@ -111,6 +104,10 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) 
   const effectiveDagTaskManagers = payloadDagTaskManagers || dagTaskManagers;
 
   const createSessionFactory = resolveCreateSessionFactory();
+  const isPatched = createSessionFactory === patchedCreateAgentSession;
+  ctx?.ui?.notify?.(`[DAG] Using ${isPatched ? 'PATCHED' : 'ORIGINAL'} createAgentSession`, isPatched ? 'success' : 'error');
+  ctx?.ui?.notify?.(`[DAG] patchedCreateAgentSession exists: ${!!patchedCreateAgentSession}`, 'info');
+  
   if (!createSessionFactory) {
     return {
       content: [{ type: "text", text: "DAG initialization failed: createAgentSession unavailable" }],
