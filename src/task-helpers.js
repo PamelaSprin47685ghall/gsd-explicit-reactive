@@ -39,6 +39,12 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
 
 export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainSessionCtx) => {
   try {
+    // DEBUG: Check what we received
+    ctx?.ui?.notify?.(`[${taskId}] createTaskSession called`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] mainSessionCtx exists: ${!!mainSessionCtx}`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] mainSessionCtx.ui exists: ${!!mainSessionCtx?.ui}`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] ctx.session exists: ${!!ctx?.session}`, 'info');
+    
     const options = { cwd: ctx?.cwd ?? process.cwd() };
     const extraActiveToolNames = [
       ...(Array.isArray(ctx?.extraActiveToolNames) ? ctx.extraActiveToolNames : []),
