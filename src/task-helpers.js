@@ -1,5 +1,109 @@
 import { mainSessionsBySessionId } from "./session-registry.js";
 
+// Output serialization gate: ensures one task's turn is not interleaved with another's.
+class TurnOutputGate {
+  constructor() {
+    this.owner = null;        // taskId currently holding the output channel
+    this.buffers = new Map(); // taskId -> event[]
+    this.listeners = [];
+  }
+
+  handleEvent(event, taskId) {
+    const isTurnStart = event?.type === "turn_start";
+    const isTurnEnd = event?.type === "turn_end";
+
+    const emit = (ev) => {
+      const marked = ev && typeof ev === "object"
+        ? { ...ev, _dagChildSession: true, _dagTaskId: taskId }
+        : ev;
+      for (const listener of this.listeners) {
+        try { listener(marked); } catch {}
+      }
+    };
+
+    if (isTurnStart) {
+      if (!this.owner || this.owner === taskId) {
+        this.owner = taskId;
+        emit(event);
+      } else {
+        this._buffer(event, taskId);
+      }
+      return;
+    }
+
+    if (isTurnEnd) {
+      if (this.owner === taskId) {
+        emit(event);
+        this.owner = null;
+        this._drain();
+      } else {
+        this._buffer(event, taskId);
+      }
+      return;
+    }
+
+    if (!this.owner || this.owner === taskId) {
+      emit(event);
+    } else {
+      this._buffer(event, taskId);
+    }
+  }
+
+  release(taskId) {
+    if (this.owner === taskId) {
+      this.owner = null;
+      this._drain();
+    }
+    this.buffers.delete(taskId);
+  }
+
+  _buffer(event, taskId) {
+    if (!this.buffers.has(taskId)) this.buffers.set(taskId, []);
+    this.buffers.get(taskId).push(event);
+  }
+
+  _drain() {
+    while (!this.owner) {
+      const nextTaskId = this._pickNextTask();
+      if (!nextTaskId) break;
+      const events = this.buffers.get(nextTaskId) ?? [];
+      this.buffers.delete(nextTaskId);
+      this.owner = nextTaskId;
+      for (const event of events) {
+        const marked = event && typeof event === "object"
+          ? { ...event, _dagChildSession: true, _dagTaskId: nextTaskId }
+          : event;
+        for (const listener of this.listeners) {
+          try { listener(marked); } catch {}
+        }
+        if (event?.type === "turn_end") {
+          this.owner = null;
+        }
+      }
+    }
+  }
+
+  _pickNextTask() {
+    for (const [taskId, events] of this.buffers) {
+      if (events.length > 0) return taskId;
+    }
+    return null;
+  }
+}
+
+const turnOutputGates = new WeakMap();
+
+function getTurnOutputGate(mainSession, listeners) {
+  if (!turnOutputGates.has(mainSession)) {
+    const gate = new TurnOutputGate();
+    gate.listeners = listeners;
+    turnOutputGates.set(mainSession, gate);
+  }
+  const gate = turnOutputGates.get(mainSession);
+  gate.listeners = listeners;
+  return gate;
+}
+
 // Task execution helpers
 
 export const sleep = (ms, signal) => new Promise((resolve, reject) => {
@@ -107,17 +211,19 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
       throw new Error(`main session ${sessionId} has no event listeners`);
     }
 
-    session.subscribe((event) => {
-      const markedEvent = event && typeof event === "object"
-        ? { ...event, _dagChildSession: true, _dagTaskId: taskId }
-        : event;
-      for (const listener of listeners) {
-        listener(markedEvent);
-      }
+    const gate = getTurnOutputGate(mainSession, listeners);
+
+    const unsubscribe = session.subscribe((event) => {
+      gate.handleEvent(event, taskId);
     });
 
+    const cleanup = () => {
+      try { unsubscribe?.(); } catch {}
+      gate.release(taskId);
+    };
+
     ctx?.ui?.notify?.(`[${taskId}] bridged to ${listeners.length} listeners`, "success");
-    return session;
+    return { session, cleanup };
   } catch (err) {
     throw new Error(`Failed to create agent session for ${taskId}: ${err.message}`);
   }

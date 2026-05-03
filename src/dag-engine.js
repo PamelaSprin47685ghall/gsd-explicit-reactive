@@ -17,7 +17,7 @@ export class DagTaskManager {
     this.abortControllers.set(taskId, taskAbort);
 
     try {
-      const session = await createTaskSession(taskId, ctx, createAgentSessionFn);
+      const { session, cleanup } = await createTaskSession(taskId, ctx, createAgentSessionFn);
 
       const availableTools = session.getActiveToolNames?.() ?? [];
       const requiredTools = ["gsd_task_complete"];
@@ -54,6 +54,7 @@ export class DagTaskManager {
 
       await runTaskLoop(session, taskId, buildTaskPrompt(taskId, planContent, dynamicToolkit), dynamicToolkit, abortSignal, taskAbort, record, ctx);
     } finally {
+      try { cleanup?.(); } catch {}
       const rec = this.agents.get(taskId);
       if (rec) {
         rec.unsubscribes?.forEach(unsub => { try { unsub(); } catch {} });
