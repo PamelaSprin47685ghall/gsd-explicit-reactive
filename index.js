@@ -1,161 +1,151 @@
-import { ensureBundledExtensionPath } from "./src/self-injection.js";
-import { injectExplicitDagEngine, registerWaitTool, width1Warned, setPatchedCreateAgentSession } from "./src/engine.js";
-import { createDagStatusWidget } from "./src/widget.js";
-import { loadGsdCore } from "./src/discovery.js";
-import { mainSessionsBySessionId, rememberSession } from "./src/session-registry.js";
+import { ensureBundledExtensionPath } from './src/self-injection.js'
+import {
+  injectExplicitDagEngine,
+  registerWaitTool,
+  width1Warned,
+  setPatchedCreateAgentSession,
+} from './src/engine.js'
+import { createDagStatusWidget } from './src/widget.js'
+import { loadGsdCore } from './src/discovery.js'
+import {
+  mainSessionsBySessionId,
+  rememberSession,
+} from './src/session-registry.js'
 
 // Lazy-load to avoid blocking module initialization
-let AgentSession = null;
-let createAgentSession = null;
-let importPromise = null;
+let AgentSession = null
+let createAgentSession = null
+let importPromise = null
 
 async function ensureCodingAgent() {
   if (!importPromise) {
-    importPromise = import("@gsd/pi-coding-agent").catch(err => {
-      console.error("[DAG] Failed to load @gsd/pi-coding-agent:", err);
-      return { AgentSession: null, createAgentSession: null };
-    });
+    importPromise = import('@gsd/pi-coding-agent').catch((err) => {
+      console.error('[DAG] Failed to load @gsd/pi-coding-agent:', err)
+      return { AgentSession: null, createAgentSession: null }
+    })
   }
-  const mod = await importPromise;
-  if (mod.AgentSession) AgentSession = mod.AgentSession;
-  if (mod.createAgentSession) createAgentSession = mod.createAgentSession;
-  return mod;
+  const mod = await importPromise
+  if (mod.AgentSession) AgentSession = mod.AgentSession
+  if (mod.createAgentSession) createAgentSession = mod.createAgentSession
+  return mod
 }
 
-ensureBundledExtensionPath(import.meta.url);
+ensureBundledExtensionPath(import.meta.url)
 
-const registeredPluginApis = new WeakSet();
+const registeredPluginApis = new WeakSet()
 
 const patchAgentSessionPrototype = () => {
-  if (!AgentSession?.prototype) return;
+  if (!AgentSession?.prototype) return
 
-  const patchKey = Symbol.for("gsd-explicit-reactive.agent-session-prototype-patched");
-  if (globalThis[patchKey]) return;
-  globalThis[patchKey] = true;
+  const patchKey = Symbol.for(
+    'gsd-explicit-reactive.agent-session-prototype-patched',
+  )
+  if (globalThis[patchKey]) return
+  globalThis[patchKey] = true
 
-  const originalBindExtensions = AgentSession.prototype.bindExtensions;
+  const originalBindExtensions = AgentSession.prototype.bindExtensions
   AgentSession.prototype.bindExtensions = async function (...args) {
-    rememberSession(this);
-    const result = await originalBindExtensions.apply(this, args);
-    rememberSession(this);
-    return result;
-  };
+    rememberSession(this)
+    const result = await originalBindExtensions.apply(this, args)
+    rememberSession(this)
+    return result
+  }
 
-  const originalNewSession = AgentSession.prototype.newSession;
+  const originalNewSession = AgentSession.prototype.newSession
   AgentSession.prototype.newSession = async function (...args) {
-    rememberSession(this);
-    const result = await originalNewSession.apply(this, args);
-    if (result) rememberSession(this);
-    return result;
-  };
-};
+    rememberSession(this)
+    const result = await originalNewSession.apply(this, args)
+    if (result) rememberSession(this)
+    return result
+  }
+}
 
 async function setupPatches() {
-  await ensureCodingAgent();
-  
+  await ensureCodingAgent()
+
   if (createAgentSession) {
-    const originalCreateAgentSession = createAgentSession;
+    const originalCreateAgentSession = createAgentSession
     const patchedCreateAgentSession = async (options) => {
       if (!originalCreateAgentSession) {
-        throw new Error("@gsd/pi-coding-agent createAgentSession unavailable");
+        throw new Error('@gsd/pi-coding-agent createAgentSession unavailable')
       }
-      const result = await originalCreateAgentSession(options);
-      rememberSession(result?.session);
-      return result;
-    };
-    setPatchedCreateAgentSession(patchedCreateAgentSession);
+      const result = await originalCreateAgentSession(options)
+      rememberSession(result?.session)
+      return result
+    }
+    setPatchedCreateAgentSession(patchedCreateAgentSession)
   }
-  
-  patchAgentSessionPrototype();
+
+  patchAgentSessionPrototype()
 }
 
 export default async function explicitReactivePlugin(pi) {
-  if (registeredPluginApis.has(pi)) return;
-  registeredPluginApis.add(pi);
+  if (registeredPluginApis.has(pi)) return
+  registeredPluginApis.add(pi)
 
   // Ensure patches are applied before any DAG operations
-  await setupPatches();
+  await setupPatches()
 
-  const dagWidgets = new Map();
-  const dagTaskManagers = new Map();
+  const dagWidgets = new Map()
+  const dagTaskManagers = new Map()
 
   const injectEngineSafely = async (ctx) => {
     try {
-      const core = await loadGsdCore();
+      const core = await loadGsdCore()
       if (!core) {
-        ctx?.ui?.notify?.("[DAG] GSD core modules not found. Plugin disabled.", "warning");
-        return;
+        ctx?.ui?.notify?.(
+          '[DAG] GSD core modules not found. Plugin disabled.',
+          'warning',
+        )
+        return
       }
-      ctx?.ui?.notify?.("[DAG] GSD core modules loaded, injecting dispatch rule...", "info");
-      injectExplicitDagEngine(core, pi, ctx, dagWidgets, dagTaskManagers);
+      ctx?.ui?.notify?.(
+        '[DAG] GSD core modules loaded, injecting dispatch rule...',
+        'info',
+      )
+      injectExplicitDagEngine(core, pi, ctx, dagWidgets, dagTaskManagers)
     } catch (err) {
-      ctx?.ui?.notify?.(`[DAG] Initialization failed: ${err.message}`, "error");
+      ctx?.ui?.notify?.(`[DAG] Initialization failed: ${err.message}`, 'error')
     }
-  };
+  }
 
-  registerWaitTool(pi, dagTaskManagers);
+  registerWaitTool(pi, dagTaskManagers)
 
-  await injectEngineSafely(undefined);
+  await injectEngineSafely(undefined)
 
-  pi.on("session_start", async (_event, ctx) => {
-    const sessionId = ctx.sessionManager?.getSessionId?.();
-    const hasSession = sessionId ? mainSessionsBySessionId.has(sessionId) : false;
-    ctx?.ui?.notify?.(`[DAG] Session registry ${hasSession ? "has" : "missing"} current session ${sessionId ?? "unknown"}`, hasSession ? "success" : "warning");
+  pi.on('session_start', async (_event, ctx) => {
+    const sessionId = ctx.sessionManager?.getSessionId?.()
+    const hasSession = sessionId
+      ? mainSessionsBySessionId.has(sessionId)
+      : false
+    ctx?.ui?.notify?.(
+      `[DAG] Session registry ${hasSession ? 'has' : 'missing'} current session ${sessionId ?? 'unknown'}`,
+      hasSession ? 'success' : 'warning',
+    )
 
     if (sessionId) {
       if (!dagWidgets.has(sessionId)) {
-        dagWidgets.set(sessionId, createDagStatusWidget(ctx));
+        dagWidgets.set(sessionId, createDagStatusWidget(ctx))
       }
     }
 
-    await injectEngineSafely(ctx);
-  });
+    await injectEngineSafely(ctx)
+  })
 
-  pi.on("session_shutdown", async (_event, ctx) => {
-    const sessionId = ctx.sessionManager?.getSessionId?.();
+  pi.on('session_shutdown', async (_event, ctx) => {
+    const sessionId = ctx.sessionManager?.getSessionId?.()
     if (sessionId) {
       if (dagTaskManagers.has(sessionId)) {
-        const manager = dagTaskManagers.get(sessionId);
-        manager.abortAll();
-        dagTaskManagers.delete(sessionId);
+        const manager = dagTaskManagers.get(sessionId)
+        manager.abortAll()
+        dagTaskManagers.delete(sessionId)
       }
       if (dagWidgets.has(sessionId)) {
-        const widget = dagWidgets.get(sessionId);
-        widget.stop?.();
-        dagWidgets.delete(sessionId);
+        const widget = dagWidgets.get(sessionId)
+        widget.stop?.()
+        dagWidgets.delete(sessionId)
       }
     }
-    width1Warned.clear();
-  });
-
-  // Zero-intrusion pre-execution check bypass:
-// When pre-exec blocks auto-mode, let it pause, then magically resume.
-// Added retry counter and exponential backoff to prevent infinite loops.
-const preExecRetries = new Map();
-
-pi.on("notification", async (event, ctx) => {
-  const msg = event.message || event.text || event.content || event.errorMessage || "";
-  if (msg.includes("Pre-execution checks failed") || msg.includes("Pre-execution checks error")) {
-    const sessionId = ctx?.sessionManager?.getSessionId?.();
-    const retries = sessionId ? (preExecRetries.get(sessionId) || 0) : 0;
-
-    if (retries >= 3) {
-      ctx?.ui?.notify?.("[DAG] Pre-execution checks failed 3 times. Manual intervention required.", "error");
-      if (sessionId) preExecRetries.delete(sessionId);
-      return;
-    }
-
-    if (sessionId) preExecRetries.set(sessionId, retries + 1);
-    const backoffMs = 2000 * Math.pow(2, retries);
-
-    ctx?.ui?.notify?.(`[DAG] Ignoring pre-execution checks failure (retry ${retries + 1}/3), resuming auto-mode...`, "info");
-    setTimeout(() => {
-      try {
-        pi.sendUserMessage("/gsd auto", { deliverAs: "followUp" });
-      } catch (err) {
-        console.error("[DAG] Failed to resume auto-mode:", err);
-      }
-    }, backoffMs);
-  }
-});
+    width1Warned.clear()
+  })
 }
