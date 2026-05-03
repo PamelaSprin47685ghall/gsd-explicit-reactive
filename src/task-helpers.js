@@ -51,7 +51,6 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
       throw new Error(`Main session ${sessionId ?? "unknown"} not registered`);
     }
 
-    // 从主会话强继承所有关键运行时，确保子会话与主会话完全等同
     const options = { cwd: ctx?.cwd ?? process.cwd() };
 
     if (mainSession.resourceLoader) {
@@ -75,15 +74,12 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
         options.extraActiveToolNames = activeToolNames;
       }
     }
-    // 继承 customTools（private 字段，JS 可访问但加防御）
     if (mainSession._customTools?.length > 0) {
       options.customTools = mainSession._customTools;
     }
-    // 继承 scopedModels（private 字段）
     if (mainSession._scopedModels?.length > 0) {
       options.scopedModels = mainSession._scopedModels;
     }
-    // 保留 ctx 传入的 tools（SDK 自定义工具）
     if (Array.isArray(ctx?.tools) && ctx.tools.length > 0) {
       options.tools = ctx.tools;
     }
@@ -93,7 +89,6 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
 
     const session = result.session;
 
-    // 防回退断言：检查子会话扩展加载数量是否与主会话一致
     try {
       const mainExts = mainSession.resourceLoader?.getExtensions?.();
       const childExts = session.resourceLoader?.getExtensions?.();
@@ -113,8 +108,11 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
     }
 
     session.subscribe((event) => {
+      const markedEvent = event && typeof event === "object"
+        ? { ...event, _dagChildSession: true, _dagTaskId: taskId }
+        : event;
       for (const listener of listeners) {
-        listener(event);
+        listener(markedEvent);
       }
     });
 
@@ -136,13 +134,10 @@ export const setupSessionAbort = (session, taskAbort, record) => {
   }
 };
 
-const FATAL_ERROR_PATTERNS = ["session closed"];
-const MAX_RETRIES = 20;
 const MAX_EMPTY_TURNS = 30;
 
 export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, abortSignal, taskAbort, record, ctx) => {
   let currentPrompt = basePrompt;
-  let retryCount = 0;
   let emptyTurnCount = 0;
   let totalEmptyTurnCount = 0;
 
@@ -152,47 +147,56 @@ export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, a
       throw new Error("Task aborted");
     }
 
-    if (retryCount >= MAX_RETRIES) {
-      record.status = "failed";
-      throw new Error(`Task ${taskId} exceeded maximum retry count (${MAX_RETRIES}). Last error was persistent.`);
-    }
     if (totalEmptyTurnCount >= MAX_EMPTY_TURNS) {
       record.status = "failed";
       throw new Error(`Task ${taskId} exited ${MAX_EMPTY_TURNS} times without calling gsd_task_complete. Aborting.`);
     }
 
     try {
-      if (retryCount > 0) {
-        ctx?.ui?.notify?.(`[${taskId}] Task agent retry (attempt ${retryCount + 1})`, "warning");
-      }
       await session.prompt(currentPrompt);
+
+      // Decoupled synchronization: wait for extension handlers (like Guardian)
+      // to process agent_end events and potentially initiate follow-up prompts.
+      try {
+        if (session._agentEventQueue) await session._agentEventQueue;
+      } catch (e) {}
+
+      // Wait if any extension actually started another streaming prompt
+      while (session.isStreaming || session.agent?.isStreaming) {
+        await new Promise(r => setTimeout(r, 200));
+        try {
+          if (session._agentEventQueue) await session._agentEventQueue;
+        } catch (e) {}
+      }
+
       if (isTaskCompleteInDb(taskId, contextToolkit)) {
         record.status = "completed";
         return;
       }
+
+      // Check if it failed and extensions (e.g. Guardian) gave up resolving it.
+      const lastMsg = session.state?.messages?.at(-1);
+      if (lastMsg?.role === "assistant" && lastMsg.stopReason === "error") {
+        record.status = "failed";
+        throw new Error(`Task ${taskId} failed: ${lastMsg.errorMessage}`);
+      }
+
       currentPrompt = "You exited without calling `gsd_task_complete`. You MUST finish the task and then call gsd_task_complete.";
       totalEmptyTurnCount++;
       if (++emptyTurnCount >= 10) {
         currentPrompt = basePrompt + `\n\n**SYSTEM NOTICE**: You have exited 10 times without completing the task. Please review the task plan and call gsd_task_complete when done.`;
         emptyTurnCount = 0;
       }
-      await new Promise(r => setTimeout(r, 0));
+
+      await new Promise(r => setTimeout(r, 100));
+
     } catch (err) {
       if (abortSignal?.aborted || taskAbort.signal.aborted) {
         record.status = "aborted";
         throw new Error("Task aborted");
       }
-
-      const errMsg = err?.message ?? String(err);
-      const isFatal = FATAL_ERROR_PATTERNS.some(p => errMsg.toLowerCase().includes(p));
-      if (isFatal) {
-        record.status = "failed";
-        throw new Error(`Task ${taskId} encountered fatal error: ${errMsg}`);
-      }
-
-      emptyTurnCount = 0;
-      currentPrompt = basePrompt + `\n\n**SYSTEM ERROR ON PREVIOUS ATTEMPT**:\n${errMsg}\nPlease try another approach. Do not give up.`;
-      await sleep(Math.min(2000 * Math.pow(2, retryCount++), 30000), taskAbort.signal).catch(() => {});
+      record.status = "failed";
+      throw new Error(`Task ${taskId} encountered fatal error: ${err.message}`);
     }
   }
 };

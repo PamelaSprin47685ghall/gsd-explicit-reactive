@@ -109,10 +109,13 @@ const spawnReadyTasks = (readyIds, deps, allTasks, running, completedIds, manage
         running.delete(taskId);
       })
       .catch(err => {
+        if (err.message !== "Task aborted") {
+          ctx?.ui?.notify?.(`Task ${taskId} failed: ${err.message}. Aborting DAG.`, "error");
+        }
         manager.failedTasks.add(taskId);
         failedIds.add(taskId);
-        ctx?.ui?.notify?.(`Task ${taskId} failed: ${err.message}`, "error");
         running.delete(taskId);
+        manager.abortAll(); // Critical: Abort entire DAG on single subtask unrecoverable failure
       });
     running.set(taskId, promise);
   }
