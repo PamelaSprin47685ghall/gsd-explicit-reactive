@@ -79,37 +79,14 @@ export default async function explicitReactivePlugin(pi) {
       } else {
         ctx?.ui?.notify?.(`[DAG] ✗ Patched createAgentSession failed: ${save.reason}`, 'error');
       }
+      // Clear the flag
+      delete patchedCreateAgentSession._lastSave;
+    } else {
+      ctx?.ui?.notify?.(`[DAG] ⚠ Patched createAgentSession was NOT called for this session`, 'warning');
     }
     
     ctx?.ui?.notify?.(`[DAG] Global map has ${mainSessionsBySessionId.size} sessions`, 'info');
-    
-    // BLACK MAGIC: Monkey patch ctx.abort to extract session reference
-    // ctx.abort() calls session.abort(), so we can intercept it
-    if (ctx && ctx.abort && !ctx.__sessionExtracted) {
-      const originalAbort = ctx.abort;
-      
-      ctx.abort = function() {
-        // When abort is called, 'this' inside the original function is the session
-        // But we can't access it directly. Instead, we'll use a different approach:
-        // We'll patch the abort function to save a reference when it's first called
-        
-        // Call the original
-        const result = originalAbort.call(this);
-        
-        // Try to extract session from the call context
-        // This won't work because 'this' here is ctx, not session
-        
-        return result;
-      };
-      
-      ctx.__sessionExtracted = true;
-    }
-    
-    // Alternative: Store ctx itself in the global map, and extract session later
-    if (sessionId) {
-      mainSessionsBySessionId.set(sessionId, ctx);
-      ctx?.ui?.notify?.(`[DAG] Stored ctx for session ${sessionId}`, 'info');
-    }
+    ctx?.ui?.notify?.(`[DAG] setPatchedCreateAgentSession was called: ${!!patchedCreateAgentSession}`, 'info');
     
     // Create widget per session
     let dagWidget = null;

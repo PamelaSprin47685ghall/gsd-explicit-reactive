@@ -22,7 +22,14 @@ const sessionFactoryCache = new WeakMap();
 
 const resolveCreateSessionFactory = () => {
   // Return the patched version if available, otherwise fall back to original
-  return patchedCreateAgentSession || createAgentSession;
+  const factory = patchedCreateAgentSession || createAgentSession;
+  const isPatched = factory === patchedCreateAgentSession;
+  
+  // Log to console since we don't have ui here
+  console.log(`[DAG] resolveCreateSessionFactory: returning ${isPatched ? 'PATCHED' : 'ORIGINAL'} version`);
+  console.log(`[DAG] patchedCreateAgentSession exists: ${!!patchedCreateAgentSession}`);
+  
+  return factory;
 };
 
 const getCurrentActiveToolNames = (ctx) => {
