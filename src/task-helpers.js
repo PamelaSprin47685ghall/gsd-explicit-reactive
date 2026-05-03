@@ -44,6 +44,16 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainS
     ctx?.ui?.notify?.(`[${taskId}] mainSessionCtx exists: ${!!mainSessionCtx}`, 'info');
     ctx?.ui?.notify?.(`[${taskId}] mainSessionCtx.ui exists: ${!!mainSessionCtx?.ui}`, 'info');
     ctx?.ui?.notify?.(`[${taskId}] ctx.session exists: ${!!ctx?.session}`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] ctx.sessionManager exists: ${!!ctx?.sessionManager}`, 'info');
+    
+    // Try to get main session through sessionManager
+    let mainSession = ctx?.session;
+    if (!mainSession && ctx?.sessionManager) {
+      // SessionManager might have a reference to the current session
+      // Try common property names
+      mainSession = ctx.sessionManager.session || ctx.sessionManager.currentSession || ctx.sessionManager._session;
+      ctx?.ui?.notify?.(`[${taskId}] Found session via sessionManager: ${!!mainSession}`, 'info');
+    }
     
     const options = { cwd: ctx?.cwd ?? process.cwd() };
     const extraActiveToolNames = [
@@ -73,8 +83,11 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainS
     const session = result.session;
     
     // MONKEY PATCH: Make task session's events visible to main session's Interactive Mode
-    if (mainSessionCtx?.ui && ctx?.session) {
-      bridgeSessionEvents(session, ctx.session, taskId, mainSessionCtx.ui);
+    if (mainSessionCtx?.ui && mainSession) {
+      ctx?.ui?.notify?.(`[${taskId}] Attempting to bridge events...`, 'info');
+      bridgeSessionEvents(session, mainSession, taskId, mainSessionCtx.ui);
+    } else {
+      ctx?.ui?.notify?.(`[${taskId}] Cannot bridge: mainSession=${!!mainSession}, ui=${!!mainSessionCtx?.ui}`, 'warning');
     }
     
     return session;
