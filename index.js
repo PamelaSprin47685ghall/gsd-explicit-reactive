@@ -19,8 +19,9 @@ let importPromise = null
 
 async function ensureCodingAgent() {
   if (!importPromise) {
-    importPromise = import('@gsd/pi-coding-agent').catch((err) => {
-      console.error('[DAG] Failed to load @gsd/pi-coding-agent:', err)
+    importPromise = import('@gsd/pi-coding-agent').catch(() => {
+      // Missing @gsd/pi-coding-agent is expected in some environments (e.g. tests)
+      // We fail silently here; setupPatches() handles the missing exports.
       return { AgentSession: null, createAgentSession: null }
     })
   }
