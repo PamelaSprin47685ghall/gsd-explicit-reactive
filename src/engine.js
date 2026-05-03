@@ -4,6 +4,7 @@ import { loadAndValidateDeps, computeReadySet, calculateDagMetrics, persistLates
 import { dagExecutionLoop } from "./dag-engine.js";
 import { payloadStore } from "./payload-store.js";
 import { createAgentSession } from "@gsd/pi-coding-agent";
+import { mainSessionsBySessionId } from "../index.js";
 
 // Will be set by index.js with the patched version
 let patchedCreateAgentSession = null;
@@ -97,6 +98,38 @@ const emitDagDispatchLog = (ctx, payload) => {
 };
 
 const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) => {
+  const sessionId = ctx?.sessionManager?.getSessionId?.();
+  ctx?.ui?.notify?.(`[DAG] executeDagTool: current session ID = ${sessionId}`, 'info');
+  
+  // BLACK MAGIC: Extract current session from ctx.getContextUsage RIGHT NOW
+  let currentSession = null;
+  if (ctx.getContextUsage) {
+    const originalGetContextUsage = ctx.getContextUsage;
+    let capturedThis = null;
+    
+    ctx.getContextUsage = function() {
+      capturedThis = this;
+      return originalGetContextUsage.call(this);
+    };
+    
+    try {
+      ctx.getContextUsage();
+      currentSession = capturedThis;
+    } catch (e) {}
+    
+    ctx.getContextUsage = originalGetContextUsage;
+  }
+  
+  if (currentSession) {
+    // Save current session to global map
+    mainSessionsBySessionId.set(sessionId, currentSession);
+    ctx?.ui?.notify?.(`[DAG] ✓ Captured CURRENT session ${sessionId} (has _eventListeners: ${!!currentSession._eventListeners})`, 'success');
+  } else {
+    ctx?.ui?.notify?.(`[DAG] ✗ Failed to capture current session`, 'error');
+  }
+  
+  ctx?.ui?.notify?.(`[DAG] Global map now has ${mainSessionsBySessionId.size} sessions`, 'info');
+  
   const payload = payloadStore.take(_params.unitId);
   if (!payload) return { content: [{ type: "text", text: "DAG payload expired or missing. Try re-dispatching the task." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
 
@@ -106,7 +139,6 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) 
   const createSessionFactory = resolveCreateSessionFactory();
   const isPatched = createSessionFactory === patchedCreateAgentSession;
   ctx?.ui?.notify?.(`[DAG] Using ${isPatched ? 'PATCHED' : 'ORIGINAL'} createAgentSession`, isPatched ? 'success' : 'error');
-  ctx?.ui?.notify?.(`[DAG] patchedCreateAgentSession exists: ${!!patchedCreateAgentSession}`, 'info');
   
   if (!createSessionFactory) {
     return {
