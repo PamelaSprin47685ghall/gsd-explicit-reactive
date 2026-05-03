@@ -94,7 +94,7 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) 
   const payload = payloadStore.take(_params.unitId);
   if (!payload) return { content: [{ type: "text", text: "DAG payload expired or missing. Try re-dispatching the task." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
 
-  const { deps, allTasks, contextToolkit, db, dagWidget, dagTaskManagers: payloadDagTaskManagers } = payload;
+  const { deps, allTasks, contextToolkit, db, dagWidget, dagTaskManagers: payloadDagTaskManagers, mainSessionRef } = payload;
   const effectiveDagTaskManagers = payloadDagTaskManagers || dagTaskManagers;
 
   const createSessionFactory = resolveCreateSessionFactory();
@@ -115,7 +115,7 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) 
       createSessionFactory,
       signal,
       _onUpdate,
-      { ...ctx, extraActiveToolNames: getCurrentActiveToolNames(ctx) },
+      { ...ctx, extraActiveToolNames: getCurrentActiveToolNames(ctx), mainSessionRef },
       effectiveDagTaskManagers,
     );
     ctx?.ui?.notify?.(`DAG completed ${result.completed.length}/${result.total} tasks.`, "success");

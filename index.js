@@ -2,10 +2,38 @@ import { ensureBundledExtensionPath } from "./src/self-injection.js";
 import { injectExplicitDagEngine, registerWaitTool, width1Warned } from "./src/engine.js";
 import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
+import { createAgentSession } from "@gsd/pi-coding-agent";
 
 ensureBundledExtensionPath(import.meta.url);
 
 const registeredPluginApis = new WeakSet();
+
+// GLOBAL: Store main session references for event bridging
+export const mainSessionsBySessionId = new Map();
+
+// BLACK MAGIC: Monkey patch createAgentSession to save session references
+const originalCreateAgentSession = createAgentSession;
+const patchedCreateAgentSession = async (options) => {
+  const result = await originalCreateAgentSession(options);
+  
+  // Save session reference to global map
+  if (result?.session) {
+    const sessionId = result.session.sessionManager?.getSessionId?.();
+    if (sessionId) {
+      mainSessionsBySessionId.set(sessionId, result.session);
+      console.log(`[DAG] Saved session ${sessionId} to global map`);
+    }
+  }
+  
+  return result;
+};
+
+// Replace the global createAgentSession
+Object.defineProperty(globalThis, '__gsd_createAgentSession_patched', {
+  value: patchedCreateAgentSession,
+  writable: false,
+  configurable: false,
+});
 
 export default async function explicitReactivePlugin(pi) {
   if (registeredPluginApis.has(pi)) return;
@@ -14,7 +42,6 @@ export default async function explicitReactivePlugin(pi) {
   // Module-level state (not stored on pi)
   const dagWidgets = new Map(); // sessionId -> widget
   const dagTaskManagers = new Map(); // sessionId -> DagTaskManager
-  const mainSessions = new Map(); // sessionId -> main session (for event bridging)
 
   const injectEngineSafely = async (ctx) => {
     try {
@@ -38,6 +65,34 @@ export default async function explicitReactivePlugin(pi) {
 
   pi.on("session_start", async (_event, ctx) => {
     const sessionId = ctx.sessionManager?.getSessionId?.();
+    
+    // BLACK MAGIC: Monkey patch ctx.abort to extract session reference
+    // ctx.abort() calls session.abort(), so we can intercept it
+    if (ctx && ctx.abort && !ctx.__sessionExtracted) {
+      const originalAbort = ctx.abort;
+      
+      ctx.abort = function() {
+        // When abort is called, 'this' inside the original function is the session
+        // But we can't access it directly. Instead, we'll use a different approach:
+        // We'll patch the abort function to save a reference when it's first called
+        
+        // Call the original
+        const result = originalAbort.call(this);
+        
+        // Try to extract session from the call context
+        // This won't work because 'this' here is ctx, not session
+        
+        return result;
+      };
+      
+      ctx.__sessionExtracted = true;
+    }
+    
+    // Alternative: Store ctx itself in the global map, and extract session later
+    if (sessionId) {
+      mainSessionsBySessionId.set(sessionId, ctx);
+      ctx?.ui?.notify?.(`[DAG] Stored ctx for session ${sessionId}`, 'info');
+    }
     
     // Create widget per session
     let dagWidget = null;
