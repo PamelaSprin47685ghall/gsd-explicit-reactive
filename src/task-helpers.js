@@ -66,9 +66,9 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainS
     
     const session = result.session;
     
-    // MONKEY PATCH: Inject main session's UI into task session's tool execution context
-    if (mainSessionCtx?.ui) {
-      patchSessionUIContext(session, taskId, mainSessionCtx.ui);
+    // MONKEY PATCH: Make task session's events visible to main session's Interactive Mode
+    if (mainSessionCtx?.ui && ctx?.session) {
+      bridgeSessionEvents(session, ctx.session, taskId, mainSessionCtx.ui);
     }
     
     return session;
@@ -78,14 +78,51 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainS
 };
 
 /**
- * Monkey patch: inject task session's messages into main session's message stream.
- * This makes the main session's interactive mode render task output automatically.
+ * BLACK MAGIC: Bridge task session's events to main session's event listeners.
+ * This makes Interactive Mode render task session's tools as if they were main session's.
  */
-function patchSessionUIContext(session, taskId, mainUI) {
-  // Try to access main session through ctx (if available)
-  // This is a hack - we're trying to find the main session's agent
+function bridgeSessionEvents(taskSession, mainSession, taskId, mainUI) {
+  // Access main session's private _eventListeners array (black magic!)
+  const mainListeners = mainSession._eventListeners;
   
-  // Subscribe to task session events
+  if (!Array.isArray(mainListeners)) {
+    console.warn(`[${taskId}] Cannot access main session's event listeners - falling back to notify`);
+    fallbackToNotify(taskSession, taskId, mainUI);
+    return;
+  }
+  
+  // Subscribe to task session and forward ALL events to main session's listeners
+  taskSession.subscribe((event) => {
+    // Prefix tool names with [taskId] so they're distinguishable
+    let modifiedEvent = event;
+    
+    if (event.type === 'tool_execution_start') {
+      modifiedEvent = {
+        ...event,
+        toolName: `[${taskId}] ${event.toolName}`,
+      };
+    } else if (event.type === 'tool_execution_end') {
+      modifiedEvent = {
+        ...event,
+        toolName: `[${taskId}] ${event.toolName}`,
+      };
+    }
+    
+    // Forward to ALL main session's listeners (including Interactive Mode)
+    for (const listener of mainListeners) {
+      try {
+        listener(modifiedEvent);
+      } catch (err) {
+        // Ignore listener errors
+      }
+    }
+  });
+}
+
+/**
+ * Fallback: use notify() if we can't access event listeners
+ */
+function fallbackToNotify(session, taskId, mainUI) {
   session.subscribe((event) => {
     if (event.type === 'tool_execution_start') {
       mainUI.notify?.(`[${taskId}] ▸ ${event.toolName}`, 'info');
@@ -93,64 +130,14 @@ function patchSessionUIContext(session, taskId, mainUI) {
       const status = event.error ? '✗' : '✓';
       const duration = event.durationMs ? ` (${(event.durationMs / 1000).toFixed(1)}s)` : '';
       mainUI.notify?.(`[${taskId}] ${status} ${event.toolName}${duration}`, event.error ? 'warning' : 'info');
-    } else if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
-      // Stream assistant thinking
-      const text = event.assistantMessageEvent.delta;
-      if (text && text.trim()) {
-        mainUI.notify?.(`[${taskId}] ${text.slice(0, 100)}${text.length > 100 ? '...' : ''}`, 'info');
-      }
     }
   });
-  
-  // Also patch _buildRuntime to inject UI proxy
-  const original_buildRuntime = session._buildRuntime;
-  if (typeof original_buildRuntime !== 'function') return;
-  
-  session._buildRuntime = function(options) {
-    const result = original_buildRuntime.call(this, options);
-    
-    if (result?.tools) {
-      for (const tool of result.tools) {
-        const originalExecute = tool.execute;
-        if (typeof originalExecute === 'function') {
-          tool.execute = async function(toolCallId, params, signal, onUpdate, ctx) {
-            const proxyCtx = {
-              ...ctx,
-              ui: createUIProxy(mainUI, taskId),
-            };
-            return originalExecute.call(this, toolCallId, params, signal, onUpdate, proxyCtx);
-          };
-        }
-      }
-    }
-    
-    return result;
-  };
 }
 
 /**
- * Create a UI proxy that prefixes all notifications with [taskId]
+ * Monkey patch: inject task session's messages into main session's message stream.
+ * This makes the main session's interactive mode render task output automatically.
  */
-function createUIProxy(mainUI, taskId) {
-  return {
-    ...mainUI,
-    notify: (message, type) => {
-      mainUI.notify(`[${taskId}] ${message}`, type);
-    },
-    setStatus: (key, text) => {
-      mainUI.setStatus(`${taskId}-${key}`, text ? `[${taskId}] ${text}` : undefined);
-    },
-    setWorkingMessage: (message) => {
-      mainUI.setWorkingMessage(message ? `[${taskId}] ${message}` : undefined);
-    },
-    // Forward other methods as-is
-    select: mainUI.select?.bind(mainUI),
-    confirm: mainUI.confirm?.bind(mainUI),
-    input: mainUI.input?.bind(mainUI),
-    onTerminalInput: mainUI.onTerminalInput?.bind(mainUI),
-    setWidget: mainUI.setWidget?.bind(mainUI),
-  };
-}
 
 export const setupSessionAbort = (session, taskAbort, record) => {
   if (!taskAbort.signal) return;
