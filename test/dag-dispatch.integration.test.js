@@ -124,7 +124,7 @@ describe("dag dispatch integration", () => {
 
       assert.ok(result);
       assert.strictEqual(result.action, "dispatch");
-      assert.strictEqual(result.unitType, "reactive-execute");
+      assert.strictEqual(result.unitType, "execute-task");
       assert.ok(result.unitId.startsWith("M001/S01/reactive+"));
       assert.ok(result.prompt.includes("_wait_for_dag_completion"));
       assert.ok(registerToolCalls.includes("_wait_for_dag_completion"));

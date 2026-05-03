@@ -249,15 +249,16 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
     db,
   };
 
-  // Use reactive-execute unitType so GSD's native verifyExpectedArtifact, auto-artifact-paths,
+  // Use execute-task unitType so GSD's native verifyExpectedArtifact, auto-artifact-paths,
   // and state derivation recognize the unit without patching gsd-2.
+  // The unitId format signals this is a DAG batch execution.
   const batchSuffix = ready.join(",");
   const unitId = `${mid}/${sid}/reactive+${batchSuffix}`;
   payloadStore.set(unitId, { deps, allTasks: tasks, contextToolkit, db, dagWidget, dagTaskManagers }, 600000);
 
   return {
     action: "dispatch",
-    unitType: "reactive-execute",
+    unitType: "execute-task",
     unitId,
     prompt: `You are the DAG Execution Coordinator.\nYou MUST immediately call \`_wait_for_dag_completion\` with { "unitId": "${unitId}" }.\nDo not output any other text.\nThe tool will block until all parallel background tasks finish.`,
   };
