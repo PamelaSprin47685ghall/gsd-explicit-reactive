@@ -52,10 +52,19 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainS
     
     if (mainSession) {
       ctx?.ui?.notify?.(`[${taskId}] Main session type: ${typeof mainSession}`, 'info');
-      ctx?.ui?.notify?.(`[${taskId}] Main session has _eventListeners: ${!!mainSession._eventListeners}`, 'info');
-      if (mainSession._eventListeners) {
-        ctx?.ui?.notify?.(`[${taskId}] _eventListeners length: ${mainSession._eventListeners.length}`, 'info');
+      
+      // Check all possible property names for event listeners
+      const possibleNames = ['_eventListeners', 'eventListeners', '_listeners', 'listeners', '_subscribers', 'subscribers'];
+      for (const name of possibleNames) {
+        if (mainSession[name]) {
+          ctx?.ui?.notify?.(`[${taskId}] Found ${name}: ${Array.isArray(mainSession[name]) ? mainSession[name].length : typeof mainSession[name]}`, 'success');
+        }
       }
+      
+      // List all properties
+      const allKeys = Object.keys(mainSession);
+      ctx?.ui?.notify?.(`[${taskId}] Session has ${allKeys.length} properties`, 'info');
+      ctx?.ui?.notify?.(`[${taskId}] First 10 keys: ${allKeys.slice(0, 10).join(', ')}`, 'info');
     }
     
     const options = { cwd: ctx?.cwd ?? process.cwd() };
