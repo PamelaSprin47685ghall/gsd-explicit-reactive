@@ -71,22 +71,42 @@ export default async function explicitReactivePlugin(pi) {
   pi.on("session_start", async (_event, ctx) => {
     const sessionId = ctx.sessionManager?.getSessionId?.();
     
-    // Report patched createAgentSession status
-    if (patchedCreateAgentSession._lastSave) {
-      const save = patchedCreateAgentSession._lastSave;
-      if (save.success) {
-        ctx?.ui?.notify?.(`[DAG] ✓ Patched createAgentSession saved session ${save.sessionId} (total: ${save.total})`, 'success');
-      } else {
-        ctx?.ui?.notify?.(`[DAG] ✗ Patched createAgentSession failed: ${save.reason}`, 'error');
+    // BLACK MAGIC: Extract session from ctx.getContextUsage
+    // getContextUsage is defined as: () => this.getContextUsage()
+    // where 'this' is the session
+    let session = null;
+    
+    if (ctx.getContextUsage) {
+      // Monkey patch getContextUsage to capture 'this'
+      const originalGetContextUsage = ctx.getContextUsage;
+      let capturedThis = null;
+      
+      ctx.getContextUsage = function() {
+        capturedThis = this;
+        return originalGetContextUsage.call(this);
+      };
+      
+      // Call it once to capture 'this'
+      try {
+        ctx.getContextUsage();
+        session = capturedThis;
+      } catch (e) {
+        // Ignore errors
       }
-      // Clear the flag
-      delete patchedCreateAgentSession._lastSave;
+      
+      // Restore original
+      ctx.getContextUsage = originalGetContextUsage;
+    }
+    
+    if (session) {
+      mainSessionsBySessionId.set(sessionId, session);
+      ctx?.ui?.notify?.(`[DAG] ✓ Captured session ${sessionId} via getContextUsage (total: ${mainSessionsBySessionId.size})`, 'success');
+      ctx?.ui?.notify?.(`[DAG] Session has _eventListeners: ${!!session._eventListeners}`, 'info');
     } else {
-      ctx?.ui?.notify?.(`[DAG] ⚠ Patched createAgentSession was NOT called for this session`, 'warning');
+      ctx?.ui?.notify?.(`[DAG] ✗ Failed to capture session`, 'error');
     }
     
     ctx?.ui?.notify?.(`[DAG] Global map has ${mainSessionsBySessionId.size} sessions`, 'info');
-    ctx?.ui?.notify?.(`[DAG] setPatchedCreateAgentSession was called: ${!!patchedCreateAgentSession}`, 'info');
     
     // Create widget per session
     let dagWidget = null;
