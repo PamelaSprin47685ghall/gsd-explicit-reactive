@@ -137,9 +137,12 @@ export const setupSessionAbort = (session, taskAbort, record) => {
 const MAX_EMPTY_TURNS = 30;
 
 export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, abortSignal, taskAbort, record, ctx) => {
-  let currentPrompt = basePrompt;
   let emptyTurnCount = 0;
   let totalEmptyTurnCount = 0;
+  let consecutiveErrors = 0;
+  
+  // 维护 nextPrompt 状态，只有当确实需要发起新请求时才赋值
+  let nextPrompt = basePrompt;
 
   while (true) {
     if (abortSignal?.aborted || taskAbort.signal.aborted) {
@@ -153,20 +156,18 @@ export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, a
     }
 
     try {
-      await session.prompt(currentPrompt);
+      if (nextPrompt) {
+        await session.prompt(nextPrompt);
+        nextPrompt = null; // 消费掉
+      }
 
-      // Decoupled synchronization: wait for extension handlers (like Guardian)
-      // to process agent_end events and potentially initiate follow-up prompts.
-      try {
-        if (session._agentEventQueue) await session._agentEventQueue;
-      } catch (e) {}
+      // Decoupled synchronization: 让出事件循环，等待任何排队的扩展事件
+      try { if (session._agentEventQueue) await session._agentEventQueue; } catch (e) {}
 
-      // Wait if any extension actually started another streaming prompt
+      // 如果 Guardian 发起了修复请求，isStreaming 会变为 true。等待其完成。
       while (session.isStreaming || session.agent?.isStreaming) {
         await new Promise(r => setTimeout(r, 200));
-        try {
-          if (session._agentEventQueue) await session._agentEventQueue;
-        } catch (e) {}
+        try { if (session._agentEventQueue) await session._agentEventQueue; } catch (e) {}
       }
 
       if (isTaskCompleteInDb(taskId, contextToolkit)) {
@@ -174,29 +175,66 @@ export const runTaskLoop = async (session, taskId, basePrompt, contextToolkit, a
         return;
       }
 
-      // Check if it failed and extensions (e.g. Guardian) gave up resolving it.
+      // 检查底层 Agent 是否以错误停止（如：API 超时且核心重试耗尽，或校验出错）
       const lastMsg = session.state?.messages?.at(-1);
       if (lastMsg?.role === "assistant" && lastMsg.stopReason === "error") {
-        record.status = "failed";
-        throw new Error(`Task ${taskId} failed: ${lastMsg.errorMessage}`);
+        consecutiveErrors++;
+        let waited = 0;
+        let recovered = false;
+
+        // Guardian 正在接管。其最高退避时间为 30s。
+        // 我们给它最高 35s 的反应时间，观察它是否启动了新的 Agent Stream (isStreaming 变为 true)。
+        while (waited < 35000) {
+          await new Promise(r => setTimeout(r, 1000));
+          waited += 1000;
+          if (session.isStreaming || session.agent?.isStreaming) {
+            recovered = true;
+            break;
+          }
+        }
+
+        if (recovered) {
+          // Guardian 成功唤醒并发起了重试！此时我们只需要耐心等待这轮重试结束，然后进入下一个循环检测任务是否完成
+          while (session.isStreaming || session.agent?.isStreaming) {
+            await new Promise(r => setTimeout(r, 500));
+          }
+          continue; 
+        } else {
+          // 35 秒过去 Guardian 都没接管，说明它已到达 10 次上限彻底放弃。
+          record.status = "failed";
+          throw new Error(`Task ${taskId} failed: ${lastMsg.errorMessage}. (Guardian recovery exhausted)`);
+        }
       }
 
-      currentPrompt = "You exited without calling `gsd_task_complete`. You MUST finish the task and then call gsd_task_complete.";
+      // 既没报错也没做完，说明是 LLM 的"空回复（忘调工具）"
+      consecutiveErrors = 0;
       totalEmptyTurnCount++;
       if (++emptyTurnCount >= 10) {
-        currentPrompt = basePrompt + `\n\n**SYSTEM NOTICE**: You have exited 10 times without completing the task. Please review the task plan and call gsd_task_complete when done.`;
+        nextPrompt = basePrompt + `\n\n**SYSTEM NOTICE**: You have exited 10 times without completing the task. Please review the task plan and call gsd_task_complete when done.`;
         emptyTurnCount = 0;
+      } else {
+        nextPrompt = "You exited without calling `gsd_task_complete`. You MUST finish the task and then call gsd_task_complete.";
       }
-
-      await new Promise(r => setTimeout(r, 100));
 
     } catch (err) {
       if (abortSignal?.aborted || taskAbort.signal.aborted) {
         record.status = "aborted";
         throw new Error("Task aborted");
       }
-      record.status = "failed";
-      throw new Error(`Task ${taskId} encountered fatal error: ${err.message}`);
+
+      consecutiveErrors++;
+      if (consecutiveErrors >= 10) {
+        record.status = "failed";
+        throw new Error(`Task ${taskId} encountered fatal error: ${err.message}`);
+      }
+
+      // 深度防御：如果并非逻辑错误，而是 JS 运行时原生抛出了异常（断网等极端情况），进行本地退避重试
+      const delayMs = Math.min(2000 * Math.pow(2, consecutiveErrors - 1), 30000);
+      ctx?.ui?.notify?.(`[${taskId}] Task agent exception, retrying in ${delayMs}ms (attempt ${consecutiveErrors})`, "warning");
+      await new Promise(r => setTimeout(r, delayMs));
+      
+      // 异常情况需要重新塞回之前的 Prompt 继续执行
+      if (!nextPrompt) nextPrompt = "Please continue and complete the task.";
     }
   }
 };
