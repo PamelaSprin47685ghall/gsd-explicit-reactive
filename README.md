@@ -32,6 +32,50 @@ The `_wait_for_dag_completion` tool is registered so the agent can block until a
 - Session shutdown clears all in-memory state and payload store.
 - Forked sessions inherit the extension automatically.
 
+## Critical implementation detail: createAgentSession
+
+**⚠️ IMPORTANT**: When creating parallel agent sessions in GSD extensions, you MUST import `createAgentSession` directly from the SDK, NOT from the `pi` object.
+
+### Correct approach
+
+```javascript
+import { createAgentSession } from "@gsd/pi-coding-agent";
+
+// Use the imported function directly
+const { session } = await createAgentSession(options);
+```
+
+### ❌ Common mistake
+
+```javascript
+// This does NOT exist and will fail at runtime
+const session = await pi.createAgentSession(options);
+```
+
+### Why this matters
+
+The `pi` object passed to extensions is the **Extension API**, which provides:
+- `pi.registerTool()` - register tools
+- `pi.on()` - hook into lifecycle events  
+- `pi.events` - event emitter for cross-extension communication
+
+It does **NOT** provide session creation methods. Those live in the SDK as standalone functions.
+
+### Reference implementation
+
+See [`pi-subagents`](https://github.com/tintinweb/pi-subagents) for a production example of parallel agent session management using `createAgentSession` from the SDK.
+
+### Context: Tool execution environment
+
+When a tool's `execute` function runs, it receives:
+- `ctx` - tool execution context (NOT `ExtensionCommandContext`)
+- `signal` - AbortSignal for cancellation
+- `onUpdate` - streaming update callback
+
+The `ctx` object does NOT have `newSession()` - that method only exists on `ExtensionCommandContext` (available in command handlers, not tool handlers).
+
+For parallel task execution (like DAG workers), you need to create independent sessions using the SDK's `createAgentSession` function.
+
 ## Maintainer spec
 
 See [`SPEC.md`](./SPEC.md) for DAG engine, payload store, dependency resolution, and full-suite compatibility rules.
