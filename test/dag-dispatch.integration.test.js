@@ -89,6 +89,61 @@ function createCtx(basePath) {
 }
 
 describe("dag dispatch integration", () => {
+  it("returns concrete stop when gsd-db is unavailable", async () => {
+    const basePath = createTempBase();
+    try {
+      writeDeps(basePath, {
+        version: 1,
+        tasks: {
+          T01: { depends_on: [] },
+        },
+      });
+      const tasks = [{ id: "T01", title: "Task 1", status: "pending" }];
+      const { core, rules } = createCoreWithRules(tasks);
+      core["gsd-db"].isDbAvailable = () => false;
+
+      injectExplicitDagEngine(core, { registerTool: () => undefined }, undefined, new Map(), new Map());
+      const dagRule = rules.find((rule) => rule.name === "executing → dag (reactive-execute)");
+      assert.ok(dagRule, "dag rule should be injected");
+
+      const { ctx } = createCtx(basePath);
+      const result = await dagRule.match(ctx);
+      assert.ok(result, "result must not be null (no Unhandled phase)");
+      assert.strictEqual(result.action, "stop");
+      assert.ok(result.reason.includes("gsd-db is unavailable"), "reason must mention DB unavailable");
+      assert.strictEqual(result.level, "error");
+    } finally {
+      rmSync(basePath, { recursive: true, force: true });
+    }
+  });
+
+  it("returns concrete stop when no tasks exist", async () => {
+    const basePath = createTempBase();
+    try {
+      writeDeps(basePath, {
+        version: 1,
+        tasks: {
+          T01: { depends_on: [] },
+        },
+      });
+      const { core, rules } = createCoreWithRules([]);
+      core["gsd-db"].getSliceTasks = () => [];
+
+      injectExplicitDagEngine(core, { registerTool: () => undefined }, undefined, new Map(), new Map());
+      const dagRule = rules.find((rule) => rule.name === "executing → dag (reactive-execute)");
+      assert.ok(dagRule, "dag rule should be injected");
+
+      const { ctx } = createCtx(basePath);
+      const result = await dagRule.match(ctx);
+      assert.ok(result, "result must not be null (no Unhandled phase)");
+      assert.strictEqual(result.action, "stop");
+      assert.ok(result.reason.includes("no tasks"), "reason must mention missing tasks");
+      assert.strictEqual(result.level, "error");
+    } finally {
+      rmSync(basePath, { recursive: true, force: true });
+    }
+  });
+
   it("dispatches reactive-execute when deps are valid and ready tasks > 1", async () => {
     const basePath = createTempBase();
 

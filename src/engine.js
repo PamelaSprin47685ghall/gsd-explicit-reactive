@@ -162,7 +162,13 @@ export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTas
 
 async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManagers) {
   if (ctx.state.phase !== "executing") return null;
-  if (!ctx.state.activeSlice) return backToPlanWithError(ctx, autoDispatch);
+  if (!ctx.state.activeSlice) {
+    return {
+      action: "stop",
+      reason: "DAG dispatch blocked: current phase is \"executing\" but activeSlice is missing. Run /gsd doctor and re-derive state before retrying.",
+      level: "error",
+    };
+  }
 
   const sessionId = ctx.sessionManager?.getSessionId?.();
   const dagWidget = sessionId ? dagWidgets?.get(sessionId) : null;
@@ -171,10 +177,22 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
   const sid = ctx.state.activeSlice.id;
   const basePath = ctx.basePath;
   const db = core["gsd-db"];
-  if (!db?.isDbAvailable()) return null;
+  if (!db?.isDbAvailable()) {
+    return {
+      action: "stop",
+      reason: `DAG dispatch blocked for ${mid}/${sid}: gsd-db is unavailable in executing phase. Ensure DB is initialized, then resume auto-mode.`,
+      level: "error",
+    };
+  }
 
   const tasks = db.getSliceTasks(mid, sid);
-  if (!tasks || tasks.length === 0) return null;
+  if (!tasks || tasks.length === 0) {
+    return {
+      action: "stop",
+      reason: `DAG dispatch blocked for ${mid}/${sid}: no tasks were returned by gsd-db while phase is \"executing\". This indicates state drift (slice plan/tasks missing or DB mismatch).`,
+      level: "error",
+    };
+  }
 
   const { deps, error, errors } = loadAndValidateDeps(basePath, mid, sid, tasks);
   if (error || !deps) {
@@ -189,7 +207,13 @@ async function executeDagRule(ctx, core, autoDispatch, dagWidgets, dagTaskManage
 
   if (ready.length === 0) {
     const allDone = tasks.every(t => doneStatuses.has(t.status?.toLowerCase()));
-    if (allDone) return null;
+    if (allDone) {
+      return {
+        action: "stop",
+        reason: `DAG dispatch blocked for ${mid}/${sid}: all tasks already complete but phase is still \"executing\". State derivation may be stale — run /gsd doctor to reconcile.`,
+        level: "warning",
+      };
+    }
     const incomplete = tasks.filter(t => !doneStatuses.has(t.status?.toLowerCase())).map(t => t.id);
     persistLatestError(basePath, mid, sid, `Deadlock detected: no ready tasks but ${incomplete.length} incomplete: [${incomplete.join(", ")}]. Check for missing dependencies or circular references.`, deps, ctx);
     return backToPlanWithError(ctx, autoDispatch);
@@ -289,7 +313,7 @@ async function backToPlanWithError(ctx, autoDispatch) {
   if (typeof matchFn !== "function") {
     return {
       action: "stop",
-      reason: `plan-slice rule found but has no match function — cannot redispatch.`,
+      reason: `plan-slice rule found but has no match function — cannot redispatch for ${mid}/${sid}.`,
       level: "error",
     };
   }
@@ -297,6 +321,14 @@ async function backToPlanWithError(ctx, autoDispatch) {
   // Deep-clone state to avoid polluting the real execution context.
   const planCtx = { ...ctx, state: { ...ctx.state, phase: "planning", activeSlice: ctx.state.activeSlice ? { ...ctx.state.activeSlice } : undefined } };
   const planResult = await matchFn(planCtx);
+
+  if (!planResult) {
+    return {
+      action: "stop",
+      reason: `Back-to-plan redispatch for ${mid}/${sid} failed: plan-slice rule returned empty result in executing phase. Ensure the slice is properly planned before execution.`,
+      level: "error",
+    };
+  }
 
   if (planResult?.prompt) {
     planResult.prompt = `**DEPS.json validation failed.** You must fix the DEPS.json file.\n${errorBlock}\n\n---\n\n${planResult.prompt}`;
