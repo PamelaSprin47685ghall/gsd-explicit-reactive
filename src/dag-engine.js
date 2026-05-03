@@ -20,11 +20,15 @@ export class DagTaskManager {
     const session = await createTaskSession(taskId, ctx, createAgentSessionFn)
       .catch(err => { this.abortControllers.delete(taskId); throw err; });
 
-    // Verify and log available tools
     const availableTools = session.getActiveToolNames?.() ?? [];
-    ctx?.ui?.notify?.(`[${taskId}] Available tools: ${availableTools.join(", ")}`, "info");
+    const requiredTools = ["gsd_task_complete"];
+    const optionalTools = ["manage_todo_list", "loop_control"];
+    const missingOptionalTools = optionalTools.filter(toolName => !availableTools.includes(toolName));
+    if (missingOptionalTools.length > 0) {
+      ctx?.ui?.notify?.(`[${taskId}] Optional extension tools unavailable in task session: ${missingOptionalTools.join(", ")}`, "warning");
+    }
     
-    if (!availableTools.includes("gsd_task_complete") && !availableTools.includes("gsd_complete_task")) {
+    if (!requiredTools.some(toolName => availableTools.includes(toolName)) && !availableTools.includes("gsd_complete_task")) {
       const errorMsg = `Task session for ${taskId} missing gsd_task_complete tool. Available: ${availableTools.join(", ")}`;
       ctx?.ui?.notify?.(errorMsg, "error");
       throw new Error(errorMsg);

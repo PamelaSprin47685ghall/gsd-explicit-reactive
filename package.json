@@ -1,19 +1,25 @@
 {
   "name": "gsd-explicit-reactive",
-  "version": "5.0.0",
-  "description": "Explicit DEPS.json DAG-based parallel task dispatch engine — declaration-driven, zero monkey-patch, GSD-native",
+  "version": "5.1.0",
+  "description": "Deterministic DAG-based parallel task dispatch for GSD auto-mode.",
   "type": "module",
   "exports": "./index.js",
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:watch": "node --test --watch test/*.test.js"
   },
+  "keywords": [
+    "pi-package",
+    "gsd-extension",
+    "dag",
+    "auto-mode"
+  ],
   "gsd": {
     "extension": true
   },
   "pi": {
     "extensions": [
-      "index.js"
+      "./index.js"
     ]
   }
 }

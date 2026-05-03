@@ -1,8 +1,16 @@
+import { ensureBundledExtensionPath } from "./src/self-injection.js";
 import { injectExplicitDagEngine } from "./src/engine.js";
 import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
 
+ensureBundledExtensionPath(import.meta.url);
+
+const registeredPluginApis = new WeakSet();
+
 export default async function explicitReactivePlugin(pi) {
+  if (registeredPluginApis.has(pi)) return;
+  registeredPluginApis.add(pi);
+
   // Module-level state (not stored on pi)
   const dagWidgets = new Map(); // sessionId -> widget
   const dagTaskManagers = new Map(); // sessionId -> DagTaskManager

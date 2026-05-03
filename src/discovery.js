@@ -8,19 +8,35 @@ const CORE_MODULES = [
 
 const dedupe = (items) => [...new Set(items.filter(Boolean))];
 
-const bundledExtensionDirs = () => {
-  const raw = process.env.GSD_BUNDLED_EXTENSION_PATHS;
-  if (!raw) return [];
-  return raw
-    .split(":")
-    .map(entry => entry.trim())
-    .filter(Boolean)
-    .map(entry => {
-      if (entry.endsWith("/gsd/index.js")) return path.dirname(entry);
-      return null;
-    })
-    .filter(Boolean);
+const normalizeBundledExtensionEntry = (entry) => {
+  const normalized = path.resolve(entry.trim());
+  const fileName = path.basename(normalized);
+  const dirName = path.basename(path.dirname(normalized));
+
+  if ((fileName === "index.js" || fileName === "index.ts") && dirName === "gsd") {
+    return path.dirname(normalized);
+  }
+
+  if (path.basename(normalized) === "gsd") {
+    return normalized;
+  }
+
+  return null;
 };
+
+export const parseBundledExtensionDirs = (raw = process.env.GSD_BUNDLED_EXTENSION_PATHS, pathDelimiter = path.delimiter) => {
+  if (!raw) return [];
+  return dedupe(
+    raw
+      .split(pathDelimiter)
+      .map(entry => entry.trim())
+      .filter(Boolean)
+      .map(normalizeBundledExtensionEntry)
+      .filter(Boolean)
+  );
+};
+
+const bundledExtensionDirs = () => parseBundledExtensionDirs();
 
 const buildCandidateDirs = () => dedupe([
   process.env.GSD_CODING_AGENT_DIR ? path.join(process.env.GSD_CODING_AGENT_DIR, "extensions", "gsd") : null,

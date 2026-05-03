@@ -1,15 +1,19 @@
 {
   "id": "explicit-reactive",
-  "name": "Explicit Reactive (DAG)",
-  "version": "5.0.0",
-  "description": "Overrides parallel dispatch with deterministic explicit DEPS.json DAG declarations. Validates, detects cycles, drives background task agents.",
+  "name": "Explicit Reactive",
+  "version": "5.1.0",
+  "description": "Replaces inferred parallel dispatch with explicit DEPS.json DAG scheduling.",
   "tier": "community",
   "requires": {
     "platform": ">=2.29.0"
   },
   "provides": {
+    "tools": [
+      "_wait_for_dag_completion"
+    ],
     "hooks": [
-      "session_start"
+      "session_start",
+      "session_shutdown"
     ]
   }
 }

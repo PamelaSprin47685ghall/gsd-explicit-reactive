@@ -19,6 +19,14 @@ const resolveCreateSessionFactory = (pi) => {
   return pi.createAgentSession;
 };
 
+const getCurrentActiveToolNames = (pi) => {
+  try {
+    const activeTools = pi?.getActiveTools?.();
+    if (Array.isArray(activeTools)) return activeTools.filter(Boolean);
+  } catch {}
+  return [];
+};
+
 const isPrimaryExecuteTaskRule = (ruleName) => {
   if (typeof ruleName !== "string") return false;
   if (!ruleName.includes("executing → execute-task")) return false;
@@ -101,7 +109,7 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
       createSessionFactory,
       signal,
       _onUpdate,
-      ctx,
+      { ...ctx, extraActiveToolNames: getCurrentActiveToolNames(pi) },
       effectiveDagTaskManagers,
     );
     ctx?.ui?.notify?.(`[DAG] Successfully completed ${result.completed.length} tasks.`, "success");

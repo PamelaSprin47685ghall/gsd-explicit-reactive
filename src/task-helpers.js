@@ -40,10 +40,14 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
 export const createTaskSession = async (taskId, ctx, createAgentSessionFn) => {
   try {
     const options = { cwd: ctx?.cwd ?? process.cwd() };
+    const extraActiveToolNames = [
+      ...(Array.isArray(ctx?.extraActiveToolNames) ? ctx.extraActiveToolNames : []),
+      ...(ctx?.session?.getActiveToolNames?.() ?? []),
+    ].filter(Boolean);
 
     const SESSION_OPTION_KEYS = [
       ["tools", ctx?.tools],
-      ["extraActiveToolNames", ctx?.session?.getActiveToolNames?.()],
+      ["extraActiveToolNames", extraActiveToolNames.length > 0 ? [...new Set(extraActiveToolNames)] : undefined],
       ["model", ctx?.session?.getModel?.()],
       ["thinkingLevel", ctx?.session?.getThinkingLevel?.()],
       ["resourceLoader", ctx?.resourceLoader],
