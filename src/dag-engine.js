@@ -43,15 +43,20 @@ export class DagTaskManager {
           record.unsubscribes.push(session.subscribe(event => {
             if (event.type === "tool_execution_start") {
               record.tool = event.toolName;
-              // Immediately notify widget of tool change
-              if (ctx?.ui?.notify) {
-                ctx.ui.notify(`[${taskId}] → ${event.toolName}`, "info");
+              // Show tool execution in real-time
+              ctx?.ui?.notify?.(`[${taskId}] ▸ ${event.toolName}`, "info");
+            } else if (event.type === "tool_execution_end") {
+              // Show tool completion
+              const status = event.error ? "✗" : "✓";
+              ctx?.ui?.notify?.(`[${taskId}] ${status} ${event.toolName}`, event.error ? "warning" : "info");
+            } else if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
+              // Stream assistant text
+              if (onUpdate) {
+                onUpdate({ type: "text", text: `[${taskId}] ${event.assistantMessageEvent.delta}` });
               }
-            } else if (event.type === "assistant_message" && onUpdate) {
-              const content = event.content?.[0];
-              if (content?.type === "text" && content.text) {
-                onUpdate({ type: "text", text: `[${taskId}] ${content.text}` });
-              }
+            } else if (event.type === "turn_end") {
+              // Show turn completion
+              ctx?.ui?.notify?.(`[${taskId}] Turn ${event.turnNumber || '?'} complete`, "info");
             }
           }));
         }
