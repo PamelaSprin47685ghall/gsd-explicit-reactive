@@ -42,13 +42,20 @@ export const isTaskCompleteInDb = (taskId, contextToolkit) => {
 export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainSessionCtx) => {
   try {
     const sessionId = ctx?.sessionManager?.getSessionId?.();
+    ctx?.ui?.notify?.(`[${taskId}] Looking for session ${sessionId} in global map...`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] Global map size: ${mainSessionsBySessionId.size}`, 'info');
+    ctx?.ui?.notify?.(`[${taskId}] Global map keys: ${Array.from(mainSessionsBySessionId.keys()).join(', ')}`, 'info');
     
     // Get main session from global map (populated by monkey-patched createAgentSession)
     const mainSession = mainSessionsBySessionId.get(sessionId);
     ctx?.ui?.notify?.(`[${taskId}] Main session found: ${!!mainSession}`, mainSession ? 'success' : 'warning');
     
     if (mainSession) {
+      ctx?.ui?.notify?.(`[${taskId}] Main session type: ${typeof mainSession}`, 'info');
       ctx?.ui?.notify?.(`[${taskId}] Main session has _eventListeners: ${!!mainSession._eventListeners}`, 'info');
+      if (mainSession._eventListeners) {
+        ctx?.ui?.notify?.(`[${taskId}] _eventListeners length: ${mainSession._eventListeners.length}`, 'info');
+      }
     }
     
     const options = { cwd: ctx?.cwd ?? process.cwd() };

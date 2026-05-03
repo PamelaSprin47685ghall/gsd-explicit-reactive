@@ -1,5 +1,5 @@
 import { ensureBundledExtensionPath } from "./src/self-injection.js";
-import { injectExplicitDagEngine, registerWaitTool, width1Warned } from "./src/engine.js";
+import { injectExplicitDagEngine, registerWaitTool, width1Warned, setPatchedCreateAgentSession } from "./src/engine.js";
 import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
 import { createAgentSession } from "@gsd/pi-coding-agent";
@@ -21,19 +21,24 @@ const patchedCreateAgentSession = async (options) => {
     const sessionId = result.session.sessionManager?.getSessionId?.();
     if (sessionId) {
       mainSessionsBySessionId.set(sessionId, result.session);
-      console.log(`[DAG] Saved session ${sessionId} to global map`);
+      // Store notification for later display
+      patchedCreateAgentSession._lastSave = {
+        sessionId,
+        total: mainSessionsBySessionId.size,
+        success: true,
+      };
+    } else {
+      patchedCreateAgentSession._lastSave = { success: false, reason: 'no sessionId' };
     }
+  } else {
+    patchedCreateAgentSession._lastSave = { success: false, reason: 'no session in result' };
   }
   
   return result;
 };
 
-// Replace the global createAgentSession
-Object.defineProperty(globalThis, '__gsd_createAgentSession_patched', {
-  value: patchedCreateAgentSession,
-  writable: false,
-  configurable: false,
-});
+// Register the patched version with engine.js
+setPatchedCreateAgentSession(patchedCreateAgentSession);
 
 export default async function explicitReactivePlugin(pi) {
   if (registeredPluginApis.has(pi)) return;
@@ -65,6 +70,18 @@ export default async function explicitReactivePlugin(pi) {
 
   pi.on("session_start", async (_event, ctx) => {
     const sessionId = ctx.sessionManager?.getSessionId?.();
+    
+    // Report patched createAgentSession status
+    if (patchedCreateAgentSession._lastSave) {
+      const save = patchedCreateAgentSession._lastSave;
+      if (save.success) {
+        ctx?.ui?.notify?.(`[DAG] ✓ Patched createAgentSession saved session ${save.sessionId} (total: ${save.total})`, 'success');
+      } else {
+        ctx?.ui?.notify?.(`[DAG] ✗ Patched createAgentSession failed: ${save.reason}`, 'error');
+      }
+    }
+    
+    ctx?.ui?.notify?.(`[DAG] Global map has ${mainSessionsBySessionId.size} sessions`, 'info');
     
     // BLACK MAGIC: Monkey patch ctx.abort to extract session reference
     // ctx.abort() calls session.abort(), so we can intercept it

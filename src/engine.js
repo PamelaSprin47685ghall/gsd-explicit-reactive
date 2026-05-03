@@ -5,6 +5,12 @@ import { dagExecutionLoop } from "./dag-engine.js";
 import { payloadStore } from "./payload-store.js";
 import { createAgentSession } from "@gsd/pi-coding-agent";
 
+// Will be set by index.js with the patched version
+let patchedCreateAgentSession = null;
+export const setPatchedCreateAgentSession = (fn) => {
+  patchedCreateAgentSession = fn;
+};
+
 export const width1Warned = new Map();
 /** Prune stale width-1 warnings when a slice's DEPS is reloaded or cleared. */
 const clearWidth1Warning = (mid, sid) => width1Warned.delete(`${mid}/${sid}`);
@@ -15,8 +21,8 @@ const waitToolRegistered = new WeakSet();
 const sessionFactoryCache = new WeakMap();
 
 const resolveCreateSessionFactory = () => {
-  // Return the imported createAgentSession function
-  return createAgentSession;
+  // Return the patched version if available, otherwise fall back to original
+  return patchedCreateAgentSession || createAgentSession;
 };
 
 const getCurrentActiveToolNames = (ctx) => {
