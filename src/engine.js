@@ -137,8 +137,18 @@ export const registerWaitTool = (pi, dagTaskManagers) => {
 export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTaskManagers) {
   const autoDispatch = core["auto-dispatch"];
   const ruleRegistry = core["rule-registry"];
-  if (!autoDispatch?.DISPATCH_RULES) return;
+  if (!autoDispatch?.DISPATCH_RULES) {
+    sessionCtx?.ui?.notify?.("[DAG] DISPATCH_RULES not found in auto-dispatch module", "error");
+    return;
+  }
   const rules = autoDispatch.DISPATCH_RULES;
+
+  // Idempotency guard: check if DAG rule is already injected
+  const existingDagRule = rules.find(r => r.name === "executing → dag (reactive-execute)");
+  if (existingDagRule) {
+    sessionCtx?.ui?.notify?.("[DAG] Rule already injected, skipping", "info");
+    return;
+  }
 
   const dagRule = {
     name: "executing → dag (reactive-execute)",
@@ -148,6 +158,8 @@ export function injectExplicitDagEngine(core, pi, sessionCtx, dagWidgets, dagTas
   disableOfficialRules(rules);
   registerDagRule(rules, dagRule);
   registerWaitTool(pi, dagTaskManagers);
+  
+  sessionCtx?.ui?.notify?.(`[DAG] Injected dispatch rule (total: ${rules.length} rules)`, "info");
 
   if (ruleRegistry?.initRegistry && ruleRegistry?.convertDispatchRules) {
     try {
