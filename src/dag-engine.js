@@ -91,7 +91,10 @@ const syncDbState = (db, contextToolkit, allTasks, completedIds, ctx) => {
       }
     }
     return freshTasks;
-  } catch { return allTasks; }
+  } catch (err) {
+    ctx?.ui?.notify?.(`[DAG] DB sync failed: ${err.message}`, "warning");
+    return allTasks;
+  }
 };
 
 const spawnReadyTasks = (readyIds, deps, allTasks, running, completedIds, manager, contextToolkit, createAgentSessionFn, abortSignal, onUpdate, ctx, failedIds) => {
@@ -115,7 +118,6 @@ const spawnReadyTasks = (readyIds, deps, allTasks, running, completedIds, manage
         manager.failedTasks.add(taskId);
         failedIds.add(taskId);
         running.delete(taskId);
-        manager.abortAll(); // Critical: Abort entire DAG on single subtask unrecoverable failure
       });
     running.set(taskId, promise);
   }

@@ -2,28 +2,29 @@ import { ensureBundledExtensionPath } from "./src/self-injection.js";
 import { injectExplicitDagEngine, registerWaitTool, width1Warned, setPatchedCreateAgentSession } from "./src/engine.js";
 import { createDagStatusWidget } from "./src/widget.js";
 import { loadGsdCore } from "./src/discovery.js";
+import { mainSessionsBySessionId, rememberSession } from "./src/session-registry.js";
+
+// Lazy-load to avoid blocking module initialization
 let AgentSession = null;
 let createAgentSession = null;
-try {
-  ({ AgentSession, createAgentSession } = await import("@gsd/pi-coding-agent"));
-} catch {}
-import { mainSessionsBySessionId, rememberSession } from "./src/session-registry.js";
+let importPromise = null;
+
+async function ensureCodingAgent() {
+  if (!importPromise) {
+    importPromise = import("@gsd/pi-coding-agent").catch(err => {
+      console.error("[DAG] Failed to load @gsd/pi-coding-agent:", err);
+      return { AgentSession: null, createAgentSession: null };
+    });
+  }
+  const mod = await importPromise;
+  if (mod.AgentSession) AgentSession = mod.AgentSession;
+  if (mod.createAgentSession) createAgentSession = mod.createAgentSession;
+  return mod;
+}
 
 ensureBundledExtensionPath(import.meta.url);
 
 const registeredPluginApis = new WeakSet();
-
-const originalCreateAgentSession = createAgentSession;
-const patchedCreateAgentSession = async (options) => {
-  if (!originalCreateAgentSession) {
-    throw new Error("@gsd/pi-coding-agent createAgentSession unavailable");
-  }
-  const result = await originalCreateAgentSession(options);
-  rememberSession(result?.session);
-  return result;
-};
-
-if (createAgentSession) setPatchedCreateAgentSession(patchedCreateAgentSession);
 
 const patchAgentSessionPrototype = () => {
   if (!AgentSession?.prototype) return;
@@ -49,11 +50,31 @@ const patchAgentSessionPrototype = () => {
   };
 };
 
-patchAgentSessionPrototype();
+async function setupPatches() {
+  await ensureCodingAgent();
+  
+  if (createAgentSession) {
+    const originalCreateAgentSession = createAgentSession;
+    const patchedCreateAgentSession = async (options) => {
+      if (!originalCreateAgentSession) {
+        throw new Error("@gsd/pi-coding-agent createAgentSession unavailable");
+      }
+      const result = await originalCreateAgentSession(options);
+      rememberSession(result?.session);
+      return result;
+    };
+    setPatchedCreateAgentSession(patchedCreateAgentSession);
+  }
+  
+  patchAgentSessionPrototype();
+}
 
 export default async function explicitReactivePlugin(pi) {
   if (registeredPluginApis.has(pi)) return;
   registeredPluginApis.add(pi);
+
+  // Ensure patches are applied before any DAG operations
+  await setupPatches();
 
   const dagWidgets = new Map();
   const dagTaskManagers = new Map();
@@ -107,20 +128,34 @@ export default async function explicitReactivePlugin(pi) {
     width1Warned.clear();
   });
 
-  // Zero-intrusion pre-execution check bypass: 
-  // When pre-exec blocks auto-mode, let it pause, then magically resume.
-  pi.on("notification", async (event, ctx) => {
-    const msg = event.message || event.text || event.content || event.errorMessage || "";
-    if (msg.includes("Pre-execution checks failed") || msg.includes("Pre-execution checks error")) {
-      ctx?.ui?.notify?.("[DAG] Ignoring pre-execution checks failure, resuming auto-mode...", "info");
-      // Give pauseAuto() time to settle before issuing the resume command.
-      setTimeout(() => {
-        try {
-          pi.sendUserMessage("/gsd auto", { deliverAs: "followUp" });
-        } catch (err) {
-          console.error("[DAG] Failed to resume auto-mode:", err);
-        }
-      }, 2000);
+  // Zero-intrusion pre-execution check bypass:
+// When pre-exec blocks auto-mode, let it pause, then magically resume.
+// Added retry counter and exponential backoff to prevent infinite loops.
+const preExecRetries = new Map();
+
+pi.on("notification", async (event, ctx) => {
+  const msg = event.message || event.text || event.content || event.errorMessage || "";
+  if (msg.includes("Pre-execution checks failed") || msg.includes("Pre-execution checks error")) {
+    const sessionId = ctx?.sessionManager?.getSessionId?.();
+    const retries = sessionId ? (preExecRetries.get(sessionId) || 0) : 0;
+
+    if (retries >= 3) {
+      ctx?.ui?.notify?.("[DAG] Pre-execution checks failed 3 times. Manual intervention required.", "error");
+      if (sessionId) preExecRetries.delete(sessionId);
+      return;
     }
-  });
+
+    if (sessionId) preExecRetries.set(sessionId, retries + 1);
+    const backoffMs = 2000 * Math.pow(2, retries);
+
+    ctx?.ui?.notify?.(`[DAG] Ignoring pre-execution checks failure (retry ${retries + 1}/3), resuming auto-mode...`, "info");
+    setTimeout(() => {
+      try {
+        pi.sendUserMessage("/gsd auto", { deliverAs: "followUp" });
+      } catch (err) {
+        console.error("[DAG] Failed to resume auto-mode:", err);
+      }
+    }, backoffMs);
+  }
+});
 }

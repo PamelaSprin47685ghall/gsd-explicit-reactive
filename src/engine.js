@@ -3,10 +3,6 @@ import { readFileSync } from "node:fs";
 import { loadAndValidateDeps, computeReadySet, calculateDagMetrics, persistLatestError, clearLatestError, loadDepsError } from "./deps.js";
 import { dagExecutionLoop } from "./dag-engine.js";
 import { payloadStore } from "./payload-store.js";
-let createAgentSession = null;
-try {
-  ({ createAgentSession } = await import("@gsd/pi-coding-agent"));
-} catch {}
 
 // Will be set by index.js with the patched version
 let patchedCreateAgentSession = null;
@@ -24,8 +20,11 @@ const waitToolRegistered = new WeakSet();
 const sessionFactoryCache = new WeakMap();
 
 const resolveCreateSessionFactory = () => {
-  // Return the patched version if available, otherwise fall back to original
-  return patchedCreateAgentSession || createAgentSession;
+  // Return the patched version set by index.js
+  if (!patchedCreateAgentSession) {
+    throw new Error("[DAG] createAgentSession not initialized. Ensure setupPatches() was called.");
+  }
+  return patchedCreateAgentSession;
 };
 
 const getCurrentActiveToolNames = (ctx) => {
@@ -350,7 +349,19 @@ async function backToPlanWithError(ctx, autoDispatch) {
   }
 
   // Deep-clone state to avoid polluting the real execution context.
-  const planCtx = { ...ctx, state: { ...ctx.state, phase: "planning", activeSlice: ctx.state.activeSlice ? { ...ctx.state.activeSlice } : undefined } };
+  const activeSlice = ctx.state.activeSlice;
+  const planCtx = {
+    ...ctx,
+    state: {
+      ...ctx.state,
+      phase: "planning",
+      activeSlice: activeSlice ? structuredClone({
+        ...activeSlice,
+        goal: activeSlice.goal,
+        title: activeSlice.title,
+      }) : undefined
+    }
+  };
   const planResult = await matchFn(planCtx);
 
   if (!planResult) {
