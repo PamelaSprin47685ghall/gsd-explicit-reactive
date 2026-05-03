@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { loadAndValidateDeps, computeReadySet, calculateDagMetrics, persistLatestError, clearLatestError, loadDepsError } from "./deps.js";
 import { dagExecutionLoop } from "./dag-engine.js";
 import { payloadStore } from "./payload-store.js";
+import { createAgentSession } from "@gsd/pi-coding-agent";
 
 export const width1Warned = new Map();
 /** Prune stale width-1 warnings when a slice's DEPS is reloaded or cleared. */
@@ -13,18 +14,22 @@ const DEPS_PROMPT_HINT = "\n\n**MANDATORY**: You MUST also output a `DEPS.json` 
 const waitToolRegistered = new WeakSet();
 const sessionFactoryCache = new WeakMap();
 
-const resolveCreateSessionFactory = (pi) => {
-  if (!pi || typeof pi?.createAgentSession !== "function") return null;
-  const cached = sessionFactoryCache.get(pi);
-  if (cached) return cached;
-  sessionFactoryCache.set(pi, pi.createAgentSession);
-  return pi.createAgentSession;
+const resolveCreateSessionFactory = () => {
+  // Return the imported createAgentSession function
+  return createAgentSession;
 };
 
-const getCurrentActiveToolNames = (pi) => {
+const getCurrentActiveToolNames = (ctx) => {
   try {
-    const activeTools = pi?.getActiveTools?.();
-    if (Array.isArray(activeTools)) return activeTools.filter(Boolean);
+    // Try to get active tools from ctx.session
+    if (ctx?.session?.getActiveToolNames) {
+      const activeTools = ctx.session.getActiveToolNames();
+      if (Array.isArray(activeTools)) return activeTools.filter(Boolean);
+    }
+    // Fallback: try ctx.tools
+    if (Array.isArray(ctx?.tools)) {
+      return ctx.tools.map(t => t.name).filter(Boolean);
+    }
   } catch {}
   return [];
 };
@@ -85,17 +90,17 @@ const emitDagDispatchLog = (ctx, payload) => {
   } catch {}
 };
 
-const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, pi) => {
+const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers) => {
   const payload = payloadStore.take(_params.unitId);
   if (!payload) return { content: [{ type: "text", text: "DAG payload expired or missing. Try re-dispatching the task." }], details: { unitId: _params.unitId, error: "payload_not_found" } };
 
   const { deps, allTasks, contextToolkit, db, dagWidget, dagTaskManagers: payloadDagTaskManagers } = payload;
   const effectiveDagTaskManagers = payloadDagTaskManagers || dagTaskManagers;
 
-  const createSessionFactory = resolveCreateSessionFactory(pi);
+  const createSessionFactory = resolveCreateSessionFactory();
   if (!createSessionFactory) {
     return {
-      content: [{ type: "text", text: "DAG initialization failed: pi.createAgentSession unavailable" }],
+      content: [{ type: "text", text: "DAG initialization failed: createAgentSession unavailable" }],
       details: { error: "no_create_agent_session" },
     };
   }
@@ -110,7 +115,7 @@ const executeDagTool = async (_params, signal, _onUpdate, ctx, dagTaskManagers, 
       createSessionFactory,
       signal,
       _onUpdate,
-      { ...ctx, extraActiveToolNames: getCurrentActiveToolNames(pi) },
+      { ...ctx, extraActiveToolNames: getCurrentActiveToolNames(ctx) },
       effectiveDagTaskManagers,
     );
     ctx?.ui?.notify?.(`DAG completed ${result.completed.length}/${result.total} tasks.`, "success");
@@ -130,7 +135,7 @@ export const registerWaitTool = (pi, dagTaskManagers) => {
     label: "Wait for DAG Completion",
     description: "Blocks until all DAG background tasks complete.",
     parameters: { type: "object", properties: { unitId: { type: "string", description: "DAG execution unit ID from the dispatch prompt" } }, required: ["unitId"] },
-    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers, pi),
+    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) => executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers),
   });
 };
 
