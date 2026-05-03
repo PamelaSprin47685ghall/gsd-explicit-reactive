@@ -78,25 +78,42 @@ export const createTaskSession = async (taskId, ctx, createAgentSessionFn, mainS
 };
 
 /**
- * Monkey patch: intercept task session's tool execution to inject main session's UI.
- * This makes task output render exactly like main session output.
+ * Monkey patch: inject task session's messages into main session's message stream.
+ * This makes the main session's interactive mode render task output automatically.
  */
 function patchSessionUIContext(session, taskId, mainUI) {
-  // Store original _buildRuntime if it exists
+  // Try to access main session through ctx (if available)
+  // This is a hack - we're trying to find the main session's agent
+  
+  // Subscribe to task session events
+  session.subscribe((event) => {
+    if (event.type === 'tool_execution_start') {
+      mainUI.notify?.(`[${taskId}] ▸ ${event.toolName}`, 'info');
+    } else if (event.type === 'tool_execution_end') {
+      const status = event.error ? '✗' : '✓';
+      const duration = event.durationMs ? ` (${(event.durationMs / 1000).toFixed(1)}s)` : '';
+      mainUI.notify?.(`[${taskId}] ${status} ${event.toolName}${duration}`, event.error ? 'warning' : 'info');
+    } else if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+      // Stream assistant thinking
+      const text = event.assistantMessageEvent.delta;
+      if (text && text.trim()) {
+        mainUI.notify?.(`[${taskId}] ${text.slice(0, 100)}${text.length > 100 ? '...' : ''}`, 'info');
+      }
+    }
+  });
+  
+  // Also patch _buildRuntime to inject UI proxy
   const original_buildRuntime = session._buildRuntime;
   if (typeof original_buildRuntime !== 'function') return;
   
-  // Override _buildRuntime to inject our UI proxy
   session._buildRuntime = function(options) {
     const result = original_buildRuntime.call(this, options);
     
-    // Patch each tool's execute function to use main UI
     if (result?.tools) {
       for (const tool of result.tools) {
         const originalExecute = tool.execute;
         if (typeof originalExecute === 'function') {
           tool.execute = async function(toolCallId, params, signal, onUpdate, ctx) {
-            // Create a proxy context that uses main session's UI
             const proxyCtx = {
               ...ctx,
               ui: createUIProxy(mainUI, taskId),
