@@ -82,7 +82,10 @@ const registerDagRule = (rules, dagRule) => {
     planRule.match = async (ctx) => {
       const result = await originalMatch(ctx);
       if (result && result.prompt && !result.prompt.includes("DEPS.json")) {
-        result.prompt += DEPS_PROMPT_HINT;
+        return {
+          ...result,
+          prompt: result.prompt + DEPS_PROMPT_HINT,
+        };
       }
       return result;
     };
@@ -355,11 +358,7 @@ async function backToPlanWithError(ctx, autoDispatch) {
     state: {
       ...ctx.state,
       phase: "planning",
-      activeSlice: activeSlice ? structuredClone({
-        ...activeSlice,
-        goal: activeSlice.goal,
-        title: activeSlice.title,
-      }) : undefined
+      activeSlice: activeSlice ? { ...activeSlice } : undefined
     }
   };
   const planResult = await matchFn(planCtx);
@@ -373,7 +372,10 @@ async function backToPlanWithError(ctx, autoDispatch) {
   }
 
   if (planResult?.prompt) {
-    planResult.prompt = `**DEPS.json validation failed.** You must fix the DEPS.json file.\n${errorBlock}\n\n---\n\n${planResult.prompt}`;
+    return {
+      ...planResult,
+      prompt: `**DEPS.json validation failed.** You must fix the DEPS.json file.\n${errorBlock}\n\n---\n\n${planResult.prompt}`,
+    };
   }
   return planResult;
 }
