@@ -90,6 +90,43 @@ export default async function explicitReactivePlugin(pi) {
     const dagWidgets = new Map()
     const dagTaskManagers = new Map()
 
+    // Register input handler: when DAG tasks are running, steer user input
+    // to child sessions instead of letting the main session process it.
+    pi.on('input', (event, ctx) => {
+      const sessionId = ctx?.sessionManager?.getSessionId?.()
+      if (!sessionId || !dagTaskManagers.has(sessionId)) return undefined
+
+      const manager = dagTaskManagers.get(sessionId)
+      const activeAgents = [...manager.agents.entries()].filter(
+        ([, rec]) => rec.status === 'running' && rec.session,
+      )
+
+      if (activeAgents.length === 0) return undefined
+
+      ctx?.ui?.notify?.(
+        `[DAG] Steering user input to ${activeAgents.length} running task(s): ${activeAgents.map(([id]) => id).join(', ')}`,
+        'info',
+      )
+
+      const text = event.text
+      for (const [, rec] of activeAgents) {
+        try {
+          if (rec.session.isStreaming) {
+            rec.session.steer(text)
+          } else {
+            rec.session.prompt(text).catch(() => {})
+          }
+        } catch (steerErr) {
+          ctx?.ui?.notify?.(
+            `[DAG] Failed to steer to task: ${steerErr.message}`,
+            'warning',
+          )
+        }
+      }
+
+      return { action: 'handled' }
+    })
+
     const injectEngineSafely = async (ctx) => {
       try {
         const core = await loadGsdCore()
