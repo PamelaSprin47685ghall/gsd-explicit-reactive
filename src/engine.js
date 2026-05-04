@@ -221,25 +221,31 @@ const executeDagTool = async (
 
 export const registerWaitTool = (pi, dagTaskManagers) => {
   if (waitToolRegistered.has(pi)) return
-  waitToolRegistered.add(pi)
 
-  pi.registerTool({
-    name: '_wait_for_dag_completion',
-    label: 'Wait for DAG Completion',
-    description: 'Blocks until all DAG background tasks complete.',
-    parameters: {
-      type: 'object',
-      properties: {
-        unitId: {
-          type: 'string',
-          description: 'DAG execution unit ID from the dispatch prompt',
+  try {
+    pi.registerTool({
+      name: '_wait_for_dag_completion',
+      label: 'Wait for DAG Completion',
+      description: 'Blocks until all DAG background tasks complete.',
+      parameters: {
+        type: 'object',
+        properties: {
+          unitId: {
+            type: 'string',
+            description: 'DAG execution unit ID from the dispatch prompt',
+          },
         },
+        required: ['unitId'],
       },
-      required: ['unitId'],
-    },
-    execute: async (_toolCallId, _params, signal, _onUpdate, ctx) =>
-      executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers),
-  })
+      execute: async (_toolCallId, _params, signal, _onUpdate, ctx) =>
+        executeDagTool(_params, signal, _onUpdate, ctx, dagTaskManagers),
+    })
+
+    waitToolRegistered.add(pi)
+  } catch (error) {
+    waitToolRegistered.delete(pi)
+    throw error
+  }
 }
 
 export function injectExplicitDagEngine(
